@@ -95,7 +95,7 @@ class QLearningAgent(BaseAgent):
                 self.env.render_mode = None
 
             _, info = self.env.reset()
-            agent_pos = self.env.agent_pos
+            agent_pos = self.env.agent_pos.copy()
             done = truncated = False
             total_reward = step = 0
 
@@ -165,8 +165,15 @@ class SARSAAgent(BaseAgent):
         self.q_table = defaultdict(lambda: np.zeros(env.action_space.n))
         self.episode_rewards, self.episode_lengths, self.success_history, self.episode_paths = [], [], [], []
 
-    def _state_key(self, pos):
-        return tuple(int(x) for x in pos) if hasattr(pos, "__iter__") else pos
+    def _state_key(self, state):
+        if hasattr(state, "__iter__"):
+            state = np.asarray(state, dtype=np.float32)
+            x_b = int(np.clip(state[0]* 20, 0, 19))
+            y_b = int(np.clip(state[1] * 10, 0 ,9))
+            c_b = int(state[2] > self.env.config['agent_config']['agent_concentration_threshold'])
+
+            return (x_b, y_b, c_b)
+        return state
 
     def choose_action(self, agent_pos, greedy=False):
         key = self._state_key(agent_pos)

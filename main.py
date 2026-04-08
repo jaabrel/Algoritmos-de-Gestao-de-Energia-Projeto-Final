@@ -9,7 +9,7 @@ import json
 import gymnasium as gym
 from gymnasium import spaces
 from Agents import PPOAgent as RLPPOAgent
-from Agents import QLearningAgent as RLQLearingAgent
+from Agents import QLearningAgent as RLQLearningAgent
 from Agents import SARSAAgent as RLSARSAAgent
 
 
@@ -470,7 +470,7 @@ class PlumeRLWrapper(gym.Env):
         r = self.config['agent_start_region_radius'] * np.sqrt(np.random.rand())
         theta = 2 * np.pi * np.random.rand()
         self.pos = c + np.array([r * np.cos(theta), r * np.sin(theta)])
-        self.agent_pos = self.pos  # Compatibilidade
+        self.agent_pos = self.pos.copy()  # Compatibilidade
         self.path_history = [self.pos.copy()]
 
         # Estabilizar a pluma
@@ -483,6 +483,8 @@ class PlumeRLWrapper(gym.Env):
     def step(self, action):
         dt = self.config['dt']
 
+        prev_dist = np.linalg.norm(self.pos - np.array(self.config['source_position']))
+
         # Ação -> Vetor de Direção
         dirs = {0: np.array([0, 1]), 1: np.array([0, -1]), 2: np.array([-1, 0]), 3: np.array([1, 0])}
         target = self.pos + dirs[action] * self.config['agent_config']['agent_speed'] * dt
@@ -490,7 +492,7 @@ class PlumeRLWrapper(gym.Env):
         # Aplicar limites do mundo
         self.pos[0] = np.clip(target[0], 0, self.config['world_width'])
         self.pos[1] = np.clip(target[1], 0, self.config['world_height'])
-        self.agent_pos = self.pos
+        self.agent_pos = self.pos.copy()
         self.path_history.append(self.pos.copy())
 
         # Atualizar Física
@@ -508,17 +510,19 @@ class PlumeRLWrapper(gym.Env):
         if at_goal:
             reward = 100.0
         else:
-            reward = -0.1  # Penalidade de tempo
+            reward = -0.05  # Penalidade de tempo
             if conc > self.config['agent_config']['agent_concentration_threshold']:
                 reward += 1.0  # Bónus de tracking da pluma
 
+            world_diag = np.sqrt(self.config['world_width']**2 + self.config['world_height']**2)
+
+            reward += 0.5 * (prev_dist - dist_to_source) / world_diag * 100
         return self._get_obs(), reward, terminated, truncated, {"at_goal": at_goal}
 
     def _get_obs(self):
         conc = calculate_concentration_gaussian_numba(self.pos, self.plume.puffs_array)
-        vy = self.plume.meander_generator.meandering_vy if isinstance(self.plume.meander_generator,
-                                                                      OU_MeanderModel) else self.plume.meander_generator.update(
-            0, 0)
+
+        vy = self.plume.meander_generator.meandering_vy
         flow = np.array(self.config['mean_wind_velocity']) + np.array([0.0, vy])
 
         return np.array([
@@ -534,7 +538,7 @@ class QLearningSimAgent(Agent):
         super().__init__(config)
         dummy_env = PlumeRLWrapper(config)
         # Atenção ao typo no teu import original: RLQLearingAgent
-        self.q_agent = RLQLearingAgent(dummy_env)
+        self.q_agent = RLQLearningAgent(dummy_env)
 
         try:
             self.q_agent.load("qlearning_plume.pkl") # Usando .pkl ou a extensão que usas nos teus agentes
@@ -737,12 +741,12 @@ class Simulator:
                         font_thickness)
         cv2.putText(canvas, "(0,0)", (self._world_to_pixel((0, 0))[0] + 10, self._world_to_pixel((0, 0))[1] - 10), font,
                     font_scale, axis_color, font_thickness)
-        max_x_t = f"({int(self.world_w)}, 0)";
+        max_x_t = f"({int(self.world_w)}, 0)"
         t_s = cv2.getTextSize(max_x_t, font, font_scale, font_thickness)[0]
         cv2.putText(canvas, max_x_t, (self._world_to_pixel((self.world_w, 0))[0] - t_s[0] - 10,
                                       self._world_to_pixel((self.world_w, 0))[1] - 10), font, font_scale, axis_color,
                     font_thickness)
-        max_y_t = f"(0, {int(self.world_h)})";
+        max_y_t = f"(0, {int(self.world_h)})"
         t_s = cv2.getTextSize(max_y_t, font, font_scale, font_thickness)[0]
         cv2.putText(canvas, max_y_t,
                     (self._world_to_pixel((0, self.world_h))[0] + 10, self._world_to_pixel((0, self.world_h))[1] + 20),
@@ -891,7 +895,7 @@ if __name__ == '__main__':
             agent.train(num_episodes=episodios, print_every=10)
             agent.save("ppo_plume.pth")
         elif escolha == "2":
-            agent = RLQLearingAgent(env)
+            agent = RLQLearningAgent(env)
             agent.train(num_episodes=episodios, print_every=10)
             agent.save("qlearning_plume.pkl")
         elif escolha == "3":
