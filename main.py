@@ -462,6 +462,18 @@ class PlumeRLWrapper(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+
+        min_margin = 5.0
+
+        self.config['source_position'] = (
+            np.random.uniform(min_margin, self.config['world_width'] * 0.4),
+            np.random.uniform(min_margin, self.config['world_height'] - min_margin)
+        )
+        self.config['agent_start_region_center'] = (
+            np.random.uniform(self.config['world_width'] * 0.6, self.config['world_width'] - min_margin),
+            np.random.uniform(min_margin, self.config['world_height'] - min_margin)
+        )
+
         self.plume = FilamentPlume(self.config)
         self.time = 0.0
 
@@ -473,6 +485,10 @@ class PlumeRLWrapper(gym.Env):
         self.agent_pos = self.pos.copy()  # Compatibilidade
         self.path_history = [self.pos.copy()]
 
+        self.visit_map = {}
+        self.current_cell = None
+        self.steps_in_current_cell = 0
+
         # Estabilizar a pluma
         for _ in range(int(self.config['plume_stabilization_time'] / self.config['dt'])):
             self.plume.update(self.config['dt'], self.time)
@@ -482,22 +498,32 @@ class PlumeRLWrapper(gym.Env):
 
     def step(self, action):
         dt = self.config['dt']
+        prev_pos = self.pos.copy()
 
-        prev_dist = np.linalg.norm(self.pos - np.array(self.config['source_position']))
-
-        # Ação -> Vetor de Direção
         dirs = {0: np.array([0, 1]), 1: np.array([0, -1]), 2: np.array([-1, 0]), 3: np.array([1, 0])}
         target = self.pos + dirs[action] * self.config['agent_config']['agent_speed'] * dt
 
-        # Aplicar limites do mundo
         self.pos[0] = np.clip(target[0], 0, self.config['world_width'])
         self.pos[1] = np.clip(target[1], 0, self.config['world_height'])
         self.agent_pos = self.pos.copy()
         self.path_history.append(self.pos.copy())
 
-        # Atualizar Física
         self.plume.update(dt, self.time)
         self.time += dt
+
+        x_b = int(np.clip(self.pos[0] / self.config['world_width'] * 20, 0, 19))
+        y_b = int(np.clip(self.pos[1] / self.config['world_height'] * 10, 0, 9))
+        new_cell = (x_b, y_b)
+
+        if new_cell != self.current_cell:
+            # O agente entrou numa nova área
+            self.visit_map[new_cell] = self.visit_map.get(new_cell, 0) + 1
+            self.current_cell = new_cell
+            self.steps_in_current_cell = 0
+        else:
+            # O agente continua na mesma área
+            self.steps_in_current_cell += 1
+        visitas_nesta_celula = self.visit_map[new_cell]
 
         conc = calculate_concentration_gaussian_numba(self.pos, self.plume.puffs_array)
         dist_to_source = np.linalg.norm(self.pos - np.array(self.config['source_position']))
@@ -511,12 +537,24 @@ class PlumeRLWrapper(gym.Env):
             reward = 100.0
         else:
             reward = -0.05  # Penalidade de tempo
+
+            if visitas_nesta_celula > 2:
+                reward -= 1.0
+
+            if self.steps_in_current_cell > 40:
+                reward -= 0.5
+
             if conc > self.config['agent_config']['agent_concentration_threshold']:
-                reward += 1.0  # Bónus de tracking da pluma
+                reward += 0.5  # Bónus de tracking da pluma
 
-            world_diag = np.sqrt(self.config['world_width']**2 + self.config['world_height']**2)
+                mean_wind = np.array(self.config['mean_wind_velocity'])
+                if np.linalg.norm(mean_wind) > 0:
+                    upwind_dir = -mean_wind / np.linalg.norm(mean_wind)
+                    movement_dir = (self.pos - prev_pos) / (np.linalg.norm(self.pos - prev_pos) + 1e-8)
+                    upwind_progress = np.dot(movement_dir, upwind_dir)
+                    if upwind_progress > 0:
+                        reward += 1.5 * upwind_progress
 
-            reward += 0.5 * (prev_dist - dist_to_source) / world_diag * 100
         return self._get_obs(), reward, terminated, truncated, {"at_goal": at_goal}
 
     def _get_obs(self):
@@ -652,6 +690,17 @@ class Simulator:
 
     def reset_experiment(self):
         print("-" * 40 + f"\nStarting Experiment {self.current_experiment + 1}/{self.config['num_experiments']}")
+
+        min_margin = 5.0
+        self.config['source_position'] = (
+            np.random.uniform(min_margin, self.config['world_width'] * 0.4),
+            np.random.uniform(min_margin, self.config['world_height'] - min_margin)
+        )
+        self.config['agent_start_region_center'] = (
+            np.random.uniform(self.config['world_width'] * 0.6, self.config['world_width'] - min_margin),
+            np.random.uniform(min_margin, self.config['world_height'] - min_margin)
+        )
+
         self.logger = DataLogger(self.config, self.current_experiment)
         self.simulation_time = 0.0
         self.plume = FilamentPlume(self.config)
