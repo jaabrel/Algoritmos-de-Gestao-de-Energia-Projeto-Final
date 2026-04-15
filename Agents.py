@@ -66,22 +66,35 @@ class QLearningAgent(BaseAgent):
         self.episode_paths = []
         self.success_history = []
 
-    def _state_key(self, pos) -> tuple:
-        if hasattr(pos, "__iter__"):
-            return tuple(int(x) for x in pos)
-        return pos
+    def _state_key(self, state) -> tuple:
+        state = np.asarray(state, dtype=np.float32)
 
-    def choose_action(self, agent_pos, greedy: bool = False) -> int:
-        key = self._state_key(agent_pos)
+        x_b = int(np.clip(state[0] * 20, 0, 19))
+        y_b = int(np.clip(state[1] * 10, 0, 9))
+
+        threshold = self.env.config.get('agent_config', {}).get('agent_concentration_threshold', 1.0)
+        c_b = int(state[2] > threshold)
+
+        fx, fy = state[3], state[4]
+        angle = np.arctan2(fy, fx)
+        wind_dir = int(np.round(angle / (np.pi / 2))) % 4
+
+        return (x_b, y_b, c_b, wind_dir)
+
+    def choose_action(self, state, greedy: bool = False) -> int:
+        key = self._state_key(state)
         if not greedy and random.random() < self.epsilon:
             return self.env.action_space.sample()
         return int(np.argmax(self.q_table[key]))
 
-    def update(self, pos, action, reward, next_pos, done):
-        key = self._state_key(pos)
-        next_key = self._state_key(next_pos)
+    def update(self, state, action, reward, next_state, done):
+        key = self._state_key(state)
+        next_key = self._state_key(next_state)
+
         current_q = self.q_table[key][action]
-        target_q = reward if done else reward + self.gamma * np.max(self.q_table[next_key])
+        max_next_q = np.max(self.q_table[next_key])
+
+        target_q = reward if done else reward + self.gamma * max_next_q
         self.q_table[key][action] += self.lr * (target_q - current_q)
 
     def train(self, num_episodes=2000, render_every=None, print_every=100):
@@ -94,17 +107,16 @@ class QLearningAgent(BaseAgent):
             else:
                 self.env.render_mode = None
 
-            _, info = self.env.reset()
-            agent_pos = self.env.agent_pos.copy()
+            state, info = self.env.reset()
             done = truncated = False
             total_reward = step = 0
 
             while not (done or truncated):
-                action = self.choose_action(agent_pos)
-                _, reward, done, truncated, info = self.env.step(action)
-                next_pos = self.env.agent_pos
-                self.update(agent_pos, action, reward, next_pos, done or truncated)
-                agent_pos = next_pos
+                action = self.choose_action(state)
+                next_state, reward, done, truncated, info = self.env.step(action)
+
+                self.update(state, action, reward, next_state, done or truncated)
+                state = next_state
                 total_reward += reward
                 step += 1
 
@@ -124,24 +136,26 @@ class QLearningAgent(BaseAgent):
     def test(self, num_episodes=10, render=True, verbose=True):
         if render: self.env.render_mode = "human"
         results = {"rewards": [], "lengths": [], "successes": 0}
+
         for ep in range(1, num_episodes + 1):
-            _, info = self.env.reset()
-            agent_pos = self.env.agent_pos
+            state, info = self.env.reset()
             done = truncated = False
             total_reward = step = 0
+
             while not (done or truncated):
-                action = self.choose_action(agent_pos, greedy=True)
-                _, reward, done, truncated, info = self.env.step(action)
-                agent_pos = self.env.agent_pos
+                action = self.choose_action(state, greedy=True)
+                state, reward, done, truncated, info = self.env.step(action)
                 total_reward += reward
                 step += 1
+
             results["rewards"].append(total_reward)
             results["lengths"].append(step)
             if info["at_goal"]: results["successes"] += 1
         return results
 
     def save(self, filename="q_agent.pkl"):
-        data = {"q_table": dict(self.q_table), "epsilon": self.epsilon,
+        save_q_table = {k: v.copy() for k, v in self.q_table.items()}
+        data = {"q_table": save_q_table, "epsilon": self.epsilon,
                 "stats": {"rewards": self.episode_rewards, "lengths": self.episode_lengths,
                           "successes": self.success_history}}
         with open(filename, "wb") as f: pickle.dump(data, f)
