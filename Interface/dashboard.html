@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>React RL Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans p-6">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Componente React Reutilizável para Gráficos
+        const Grafico = ({ id, titulo, labels, label1, data1, label2, data2, color1, color2 }) => {
+            const chartRef = useRef(null);
+
+            useEffect(() => {
+                const ctx = document.getElementById(id).getContext('2d');
+                
+                // Destrói o gráfico antigo ao atualizar para não haver sobreposição
+                if (chartRef.current) {
+                    chartRef.current.destroy();
+                }
+
+                const datasets = [
+                    { label: label1, data: data1, borderColor: color1, borderWidth: 2, pointRadius: 0, tension: 0.2 }
+                ];
+
+                // Se houver um segundo conjunto de dados (ex: dados brutos no fundo)
+                if (data2) {
+                    datasets.push({ label: label2, data: data2, borderColor: color2, backgroundColor: color2.replace('1)', '0.1)'), borderWidth: 1, pointRadius: 0, fill: true });
+                }
+
+                chartRef.current = new Chart(ctx, {
+                    type: 'line',
+                    data: { labels: labels, datasets: datasets },
+                    options: { responsive: true, plugins: { title: { display: true, text: titulo, font: {size: 16} } } }
+                });
+
+                return () => chartRef.current.destroy(); // Cleanup
+            }, [labels, data1, data2]);
+
+            return <div className="bg-white p-4 rounded-xl shadow mb-6"><canvas id={id} height="80"></canvas></div>;
+        };
+
+        // Aplicação Principal React
+        const App = () => {
+            const [modelos, setModelos] = useState([]);
+            const [modeloAtivo, setModeloAtivo] = useState("");
+            const [dados, setDados] = useState(null);
+            const [erro, setErro] = useState("");
+
+            // Carregar a lista de modelos ao iniciar
+            useEffect(() => {
+                fetch('http://localhost:8000/api/modelos')
+                    .then(res => res.json())
+                    .then(data => {
+                        setModelos(data.modelos);
+                        if (data.modelos.length > 0) carregarDados(data.modelos[0]);
+                    })
+                    .catch(err => setErro("Erro ao contactar a API. O FastAPI está a correr?"));
+            }, []);
+
+            const carregarDados = (nome) => {
+                setModeloAtivo(nome);
+                setErro("");
+                fetch(`http://localhost:8000/api/dados/${nome}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.erro) setErro(data.erro);
+                        else setDados(data);
+                    });
+            };
+
+            return (
+                <div className="max-w-6xl mx-auto">
+                    <header className="mb-8 text-center">
+                        <h1 className="text-3xl font-bold text-gray-800">📊 React Dashboard: Q-Learning</h1>
+                        <p className="text-gray-500 mt-2">API FastAPI Autónoma</p>
+                    </header>
+
+                    <div className="bg-white p-4 rounded-xl shadow flex items-center justify-center gap-4 mb-6">
+                        <label className="font-semibold text-gray-700">Escolhe o Treino:</label>
+                        <select 
+                            className="border border-gray-300 p-2 rounded-lg bg-gray-50 w-1/2 focus:ring focus:ring-blue-200"
+                            value={modeloAtivo} 
+                            onChange={(e) => carregarDados(e.target.value)}
+                        >
+                            {modelos.map(m => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                    </div>
+
+                    {erro && <div className="bg-red-100 text-red-700 p-4 rounded-xl text-center font-bold mb-6">{erro}</div>}
+
+                    {dados && !erro && (
+                        <div>
+                            {/* KPIs */}
+                            <div className="grid grid-cols-3 gap-6 mb-6">
+                                <div className="bg-white p-6 rounded-xl shadow text-center">
+                                    <div className="text-4xl font-bold text-blue-600">{dados.episodios.length}</div>
+                                    <div className="text-sm text-gray-500 uppercase mt-2 font-bold">Total Episódios</div>
+                                </div>
+                                <div className="bg-white p-6 rounded-xl shadow text-center">
+                                    <div className="text-4xl font-bold text-green-500">{dados.tamanho_qtable}</div>
+                                    <div className="text-sm text-gray-500 uppercase mt-2 font-bold">Estados na Tabela-Q</div>
+                                </div>
+                                <div className="bg-white p-6 rounded-xl shadow text-center">
+                                    <div className="text-4xl font-bold text-purple-500">{dados.epsilon_final}</div>
+                                    <div className="text-sm text-gray-500 uppercase mt-2 font-bold">Taxa Exploração Final</div>
+                                </div>
+                            </div>
+
+                            {/* Gráficos usando o Componente Reutilizável */}
+                            <Grafico 
+                                id="chartRecompensas" 
+                                titulo="Evolução das Recompensas"
+                                labels={dados.episodios}
+                                label1="Média Móvel (50 eps)" data1={dados.recompensas_ma} color1="#3b82f6"
+                                label2="Bruto" data2={dados.recompensas} color2="rgba(59, 130, 246, 1)"
+                            />
+                            
+                            <Grafico 
+                                id="chartPassos" 
+                                titulo="Passos até ao Foco (Duração do Episódio)"
+                                labels={dados.episodios}
+                                label1="Média Móvel (50 eps)" data1={dados.passos_ma} color1="#f97316"
+                                label2="Bruto" data2={dados.passos} color2="rgba(249, 115, 22, 1)"
+                            />
+
+                            <Grafico 
+                                id="chartSucesso" 
+                                titulo="Taxa de Sucesso (%)"
+                                // A média móvel perde os primeiros X passos, ajustamos o eixo X
+                                labels={dados.episodios.slice(dados.episodios.length - dados.sucessos_ma.length)}
+                                label1="Taxa de Sucesso" data1={dados.sucessos_ma} color1="#22c55e"
+                            />
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
