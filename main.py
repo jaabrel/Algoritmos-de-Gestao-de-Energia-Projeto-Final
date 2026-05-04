@@ -180,7 +180,7 @@ class Sinusoid_MeanderModel(MeanderModel):
             * np.sin(2 * np.pi * self.freqs * current_time + self.phases)
         )
 
-        # --- CORRECTED LOGIC ---
+
         # Check if drift correction is enabled
         if self.drift_theta > 0:
             # If ENABLED, use the stateful, integrating model that pulls the velocity
@@ -274,6 +274,7 @@ class FilamentPlume:
         self.time_since_last_puff += dt
         release_interval = 1.0 / self.config["emission_rate"]
         puffs_to_release = int(self.time_since_last_puff / release_interval)
+
         if puffs_to_release > 0:
             new_puffs = np.zeros((puffs_to_release, 5), dtype=np.float32)
             new_puffs[:, 0:2] = self.source_pos
@@ -576,31 +577,25 @@ class PlumeRLWrapper(gym.Env):
         super().__init__()
         self.config = config
 
-        # ✓ Fixed: Proper action space (discrete 4 directions)
         self.action_space = spaces.Discrete(4)
 
-        # ✓ Fixed: Correct observation space bounds
-        # Observations: [norm_x, norm_y, conc_norm, flow_x_norm, flow_y_norm]
         self.observation_space = spaces.Box(
             low=np.array([0, 0, 0, -1, -1], dtype=np.float32),
             high=np.array([1, 1, 1, 1, 1], dtype=np.float32),
             shape=(5,),
             dtype=np.float32,
         )
-
-        # ✓ Fixed: Reward function parameters
         self.reward_config = {
-            "step_penalty": -0.01,  # Small penalty for each step
-            "concentration_improvement": 0.5,
+            "step_penalty": -0.05,
+            "concentration_improvement": 1.0,
             "concentration_decrease": -0.05,
-            "revisit_threshold": 5,  # Allow up to 5 revisits
-            "revisit_penalty": -0.1,  # Mild penalty for revisiting
+            "revisit_threshold": 1.0,  #
+            "revisit_penalty": -0.2,  # Mild penalty for revisiting
             "plume_detection_bonus": 0.3,
-            "upwind_bonus": 0.5,  # Bonus for moving upwind
-            "goal_reward": 100.0,  # Reward for reaching goal
+            "upwind_bonus": 1.0,  # Bonus for moving upwind
+            "goal_reward": 500.0,  # Reward for reaching goal
         }
 
-        # ✓ Fixed: Normalization constants
         self.conc_max = 10.0  # Expected maximum concentration
         self.flow_max = 5.0  # Expected maximum flow magnitude
 
@@ -639,7 +634,6 @@ class PlumeRLWrapper(gym.Env):
         # Validate config
         self._validate_config()
 
-        # ✓ Fixed: Randomize source and start positions
         min_margin = 5.0
 
         self.config["agent_start_region_center"] = (
@@ -680,7 +674,7 @@ class PlumeRLWrapper(gym.Env):
         """
         Execute one step in environment
 
-        ✓ Fixed: Improved reward function
+
 
         Args:
             action: Action index (0=up, 1=down, 2=left, 3=right)
@@ -691,7 +685,6 @@ class PlumeRLWrapper(gym.Env):
         dt = self.config["dt"]
         self.prev_pos = self.pos.copy()
 
-        # ✓ Fixed: Action to direction mapping
         dirs = {
             0: np.array([0, -1]),  # Up (positive Y)
             1: np.array([0, 1]),  # Down (negative Y)
@@ -722,7 +715,7 @@ class PlumeRLWrapper(gym.Env):
         else:
             self.steps_in_current_cell += 1
 
-        visitas_nesta_celula = self.visit_map[new_cell]
+        visitas_nesta_celula = self.visit_map.get(new_cell, 1)
 
         self.prev_conc = self.current_conc
         self.current_conc = calculate_concentration_gaussian_numba(
@@ -739,7 +732,7 @@ class PlumeRLWrapper(gym.Env):
         terminated = at_goal
         truncated = self.time >= self.config["max_time"]
 
-        # ✓ Fixed: Improved reward function
+
         reward = self._calculate_reward(
             self.current_conc, self.prev_conc, visitas_nesta_celula, at_goal
         )
@@ -750,7 +743,7 @@ class PlumeRLWrapper(gym.Env):
         """
         Calculate reward for current step
 
-        ✓ Fixed: Encourages exploration and gradient following
+
 
         Args:
             conc: Current concentration
@@ -763,13 +756,13 @@ class PlumeRLWrapper(gym.Env):
         if at_goal:
             return self.reward_config["goal_reward"]
 
-        # Base penalty for each step (encourages efficiency)
+
         reward = self.reward_config["step_penalty"]
 
-        # ✓ NEW: Reward for concentration gradient (most important!)
+
         conc_diff = conc - prev_conc
         if conc_diff > 0:
-            # Reward proportional to improvement (capped at 1.0)
+
             reward += self.reward_config["concentration_improvement"] * min(
                 conc_diff, 1.0
             )
@@ -806,7 +799,6 @@ class PlumeRLWrapper(gym.Env):
 
         conc_normalized = np.clip(self.current_conc / self.conc_max, 0, 1)
 
-        # ✓ Fixed: Consistent wind measurement (use stored value, don't call update)
         vy = self.plume.meander_generator.meandering_vy
         flow = np.array(self.config["mean_wind_velocity"]) + np.array([0.0, vy])
 
@@ -840,36 +832,32 @@ class QLearningSimAgent(Agent):
     def __init__(self, config):
         super().__init__(config)
         dummy_env = PlumeRLWrapper(config)
-        # Atenção ao typo no teu import original: RLQLearingAgent
+
         self.q_agent = RLQLearningAgent(dummy_env)
 
+        chosen_model = self.config.get("model_to_load", "qlearning_plume.pkl")
+
         try:
-            self.q_agent.load(
-                "qlearning_plume.pkl"
-            )  # Usando .pkl ou a extensão que usas nos teus agentes
-            print("\n[+] Modelo 'qlearning_plume.pkl' carregado com sucesso!")
+            self.q_agent.load(chosen_model)
+            print(f"\n[+] Model '{chosen_model}' loaded")
         except:
-            print(
-                "\n[-] AVISO: 'qlearning_plume.pkl' não encontrado. O agente vai mover-se aleatoriamente. Treina-o primeiro!"
-            )
+            print(f"\n[-] Model '{chosen_model}' not found")
 
     def run_search_algorithm(self, dt):
         obs = np.array(
             [
                 self.pos[0] / self.config["world_width"],
                 self.pos[1] / self.config["world_height"],
-                self.current_concentration,
-                self.measured_flow_direction[0],
-                self.measured_flow_direction[1],
-            ],
-            dtype=np.float32,
-        )
+                np.clip(self.current_concentration / 10.0, 0, 1),
+                np.clip(self.measured_flow_direction[0] / 5.0, -1, 1),
+                np.clip(self.measured_flow_direction[1] / 5.0, -1, 1),
+            ],dtype=np.float32)
 
         action = self.q_agent.choose_action(obs, greedy=True)
 
         dirs = {
-            0: np.array([0, 1]),
-            1: np.array([0, -1]),
+            0: np.array([0, -1]),
+            1: np.array([0, 1]),
             2: np.array([-1, 0]),
             3: np.array([1, 0]),
         }
@@ -909,10 +897,6 @@ class Simulator:
         )
 
         min_margin = 5.0
-        self.config["source_position"] = (
-            np.random.uniform(min_margin, self.config["world_width"] * 0.4),
-            np.random.uniform(min_margin, self.config["world_height"] - min_margin),
-        )
         self.config["agent_start_region_center"] = (
             np.random.uniform(
                 self.config["world_width"] * 0.6,
@@ -1172,7 +1156,7 @@ class Simulator:
 
         t_s_r = cv2.getTextSize(info_right, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)[0]
 
-        # --- CORRECTED LINE ---
+
         # The color tuple (255, 255, 255) and thickness integer (1) are now in the correct order.
         cv2.putText(
             canvas,
@@ -1199,7 +1183,7 @@ if __name__ == "__main__":
 
     CONFIG = {
         "dt": 0.1,
-        "max_time": 100.0,
+        "max_time": 200.0,
         "save_path": "experiments",
         "experiment_name": "bio_inspired_test",
         "visualize": True,
@@ -1224,7 +1208,7 @@ if __name__ == "__main__":
             "timescale": 0.1,
         },
         "sinusoid_meander_config": {
-            "num_harmonics": 1,
+            "num_harmonics": 10,
             "v_var": 0.8,  #
             "integral_length_scale_L": 20.0,
             "drift_correction_timescale": 10,

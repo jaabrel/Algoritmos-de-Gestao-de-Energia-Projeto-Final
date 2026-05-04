@@ -7,16 +7,6 @@ from collections import defaultdict
 
 
 class QLearningAgent:
-    """
-    Improved Q-Learning Agent with proper state binning, reward shaping, and tracking.
-
-    Key improvements:
-    - Proper episode length tracking
-    - Better state binning with configurable resolution
-    - Improved epsilon decay schedule
-    - Correct terminal state handling
-    - Configuration validation
-    """
 
     def __init__(
         self,
@@ -24,9 +14,9 @@ class QLearningAgent:
         learning_rate: float = 0.1,
         discount_factor: float = 0.99,
         exploration_rate: float = 1.0,
-        exploration_decay: float = 0.9995,  # ✓ Fixed: was 0.995 (too aggressive)
+        exploration_decay: float = 0.998,
         min_exploration_rate: float = 0.01,
-        state_bins: dict = None,  # ✓ New: configurable binning
+        state_bins: dict = None,
     ):
         """
         Initialize Q-Learning Agent
@@ -47,17 +37,17 @@ class QLearningAgent:
         self.epsilon_decay = exploration_decay
         self.min_epsilon = min_exploration_rate
 
-        # ✓ Fixed: Configurable state binning
+
         self.state_bins = state_bins or {
-            "x": 50,  # Position X bins
-            "y": 25,  # Position Y bins
+            "x": 20,  # Position X bins
+            "y": 10,  # Position Y bins
             "conc": 3,  # Concentration bins (low, medium, high)
             "wind": 4,  # Wind direction bins (4 cardinal directions)
         }
 
         self.q_table = {}
 
-        # ✓ Fixed: Tracking statistics
+
         self.episode_rewards = []
         self.episode_lengths = []  # ✓ Now properly tracked
         self.success_history = []
@@ -69,7 +59,6 @@ class QLearningAgent:
         State format: [norm_x, norm_y, conc, flow_x, flow_y]
         All values should be normalized to [0, 1] range (or close to it)
 
-        ✓ Fixed: Better binning with configurable resolution
         """
         state = np.asarray(state, dtype=np.float32)
 
@@ -216,7 +205,7 @@ class QLearningAgent:
             },
             "stats": {
                 "rewards": self.episode_rewards,
-                "lengths": self.episode_lengths,  # ✓ Now properly saved
+                "lengths": self.episode_lengths,
                 "successes": self.success_history,
             },
         }
