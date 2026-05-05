@@ -7,7 +7,6 @@ from collections import defaultdict
 
 
 class QLearningAgent:
-
     def __init__(
         self,
         env,
@@ -37,7 +36,6 @@ class QLearningAgent:
         self.epsilon_decay = exploration_decay
         self.min_epsilon = min_exploration_rate
 
-
         self.state_bins = state_bins or {
             "x": 20,  # Position X bins
             "y": 10,  # Position Y bins
@@ -47,10 +45,10 @@ class QLearningAgent:
 
         self.q_table = {}
 
-
         self.episode_rewards = []
-        self.episode_lengths = []  # ✓ Now properly tracked
+        self.episode_lengths = []
         self.success_history = []
+        self.saved_paths = {}
 
     def _state_key(self, state) -> tuple:
         """
@@ -135,6 +133,7 @@ class QLearningAgent:
 
         for ep in range(1, num_episodes + 1):
             state, info = env.reset()
+            current_path = [(state[0], state[1])]
             done = truncated = False
             total_reward = 0
             step = 0
@@ -142,6 +141,8 @@ class QLearningAgent:
             while not (done or truncated):
                 action = self.choose_action(state)
                 next_state, reward, done, truncated, info = env.step(action)
+
+                current_path.append((next_state[0], next_state[1]))
 
                 self.update(state, action, reward, next_state, done, truncated)
 
@@ -173,6 +174,8 @@ class QLearningAgent:
                     f"ε: {self.epsilon:.4f} | "
                     f"Q-States: {len(self.q_table):>5}"
                 )
+                if ep % 100 == 0 or ep > num_episodes - 10:
+                    self.saved_paths[ep] = current_path
 
     def save(self, filename=None):
         """
@@ -207,6 +210,7 @@ class QLearningAgent:
                 "rewards": self.episode_rewards,
                 "lengths": self.episode_lengths,
                 "successes": self.success_history,
+                "paths": getattr(self, "saved_paths", {}),
             },
         }
 
