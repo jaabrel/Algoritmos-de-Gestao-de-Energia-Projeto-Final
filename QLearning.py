@@ -131,7 +131,11 @@ class QLearningAgent:
         )
         print(f"{'=' * 70}\n")
 
-        for ep in range(1, num_episodes + 1):
+        episodios_iniciais = len(self.episode_rewards)
+
+        for ep_relativo in range(1, num_episodes + 1):
+            ep_absoluto = episodios_iniciais + ep_relativo
+
             state, info = env.reset()
             current_path = [(state[0], state[1])]
             done = truncated = False
@@ -141,7 +145,6 @@ class QLearningAgent:
             while not (done or truncated):
                 action = self.choose_action(state)
                 next_state, reward, done, truncated, info = env.step(action)
-
                 current_path.append((next_state[0], next_state[1]))
 
                 self.update(state, action, reward, next_state, done, truncated)
@@ -158,24 +161,25 @@ class QLearningAgent:
             # Decay exploration
             if self.epsilon > self.min_epsilon:
                 self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+            
+            if ep_absoluto % 50 == 0 or ep_relativo > num_episodes - 10:
+                self.saved_paths[ep_absoluto] = current_path
 
             # Print progress
-            if ep % print_every == 0:
-                w = min(print_every, ep)
+            if ep_relativo % print_every == 0:
+                w = min(print_every, ep_relativo)
                 avg_reward = np.mean(self.episode_rewards[-w:])
                 avg_length = np.mean(self.episode_lengths[-w:])
                 avg_success = np.mean(self.success_history[-w:]) * 100
 
                 print(
-                    f"  Ep {ep:>5}/{num_episodes} | "
+                    f"  Ep {ep_absoluto:>5} (+{ep_relativo} | "
                     f"Avg Reward: {avg_reward:>7.2f} | "
                     f"Avg Length: {avg_length:>6.1f} | "
                     f"Success: {avg_success:>5.1f}% | "
                     f"ε: {self.epsilon:.4f} | "
                     f"Q-States: {len(self.q_table):>5}"
                 )
-                if ep % 100 == 0 or ep > num_episodes - 10:
-                    self.saved_paths[ep] = current_path
 
     def save(self, filename=None):
         """
@@ -212,6 +216,8 @@ class QLearningAgent:
                 "successes": self.success_history,
                 "paths": getattr(self, "saved_paths", {}),
             },
+            "source_pos": getattr(self.env, 'config', {}).get("source_position", (20.0, 25.0)),
+            "world_size": (getattr(self.env, 'config', {}).get("world_width", 100.0), getattr(self.env, 'config', {}).get("world_height", 50.0))
         }
 
         with open(caminho_completo, "wb") as f:
@@ -253,6 +259,7 @@ class QLearningAgent:
                 self.episode_rewards = data["stats"].get("rewards", [])
                 self.episode_lengths = data["stats"].get("lengths", [])
                 self.success_history = data["stats"].get("successes", [])
+                self.saved_paths = data["stats"].get("paths", {})
 
             print(f"[+] Model loaded from {filepath}")
             print(f"    Q-table states: {len(self.q_table)}")

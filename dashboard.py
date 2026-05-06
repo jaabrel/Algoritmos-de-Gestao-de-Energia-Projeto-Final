@@ -6,13 +6,16 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import sys
 
 class DashboardApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Dashboard Q-Learning")
-        self.root.geometry("900x800")
+        self.root.geometry("1000x850")
+        self.root.protocol("WM_DELETE_WINDOW", self.fechar_aplicacao)
 
         self.pasta_modelos = "modelos"
 
@@ -20,13 +23,9 @@ class DashboardApp:
         control_frame = ttk.Frame(root, padding="10")
         control_frame.pack(side=tk.TOP, fill=tk.X)
 
-        ttk.Label(
-            control_frame, text="Selecione o Modelo:", font=("Arial", 11, "bold")
-        ).pack(side=tk.LEFT, padx=5)
+        ttk.Label(control_frame, text="Selecione o Modelo:", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=5)
 
-        self.combo_modelos = ttk.Combobox(
-            control_frame, state="readonly", width=45, font=("Arial", 10)
-        )
+        self.combo_modelos = ttk.Combobox(control_frame, state="readonly", width=45, font=("Arial", 10))
         self.combo_modelos.pack(side=tk.LEFT, padx=5)
         self.combo_modelos.bind("<<ComboboxSelected>>", self.carregar_dados)
 
@@ -46,13 +45,30 @@ class DashboardApp:
             foreground="#333333",
         )
         self.lbl_stats.pack()
+        
+        # --- SISTEMA DE PÁGINAS (Tabs) ---
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # --- PAINEL DOS GRÁFICOS (Canvas) ---
-        self.plot_frame = ttk.Frame(root)
-        self.plot_frame.pack(side=tk.TOP, expand=True, fill=tk.BOTH)
+        # --- Criar os frames de cada página ---
+        self.tab_metricas = ttk.Frame(self.notebook)
+        self.tab_mapa = ttk.Frame(self.notebook)
 
-        self.canvas_widget = None
+        # --- Adicionar as páginas ao Notebook ---
+        self.notebook.add(self.tab_metricas, text="Métricas de Treino")
+        self.notebook.add(self.tab_mapa, text="Mapa de Rotas")
+
+        # --- Controlos dos Gráficos ----
+        self.canvas_metricas = None
+        self.canvas_mapa = None
+
         self.listar_modelos()
+
+    def fechar_aplicacao(self):
+        plt.close('all')
+        self.root.quit()
+        self.root.destroy()
+        sys.exit(0)
 
     def listar_modelos(self):
         """Procura todos os ficheiros .pkl e atualiza o dropdown."""
@@ -106,6 +122,7 @@ class DashboardApp:
         # Calcular estatísticas finais
         sucessos = stats["successes"]
         tamanhos = stats["lengths"]
+
         ultimos_100_sucesso = (
             np.mean(sucessos[-100:]) * 100
             if len(sucessos) >= 100
@@ -124,105 +141,103 @@ class DashboardApp:
         )
         self.lbl_stats.config(text=texto_stats)
 
-        # Passa o dicionário 'stats' inteiro para os gráficos
-        self.desenhar_graficos(stats)
+        self.desenhar_graficos(data)
 
-    def desenhar_graficos(self, stats):
-        """Embutir os gráficos Matplotlib na interface Tkinter."""
-        recompensas, tamanhos, sucessos = (
-            stats["rewards"],
-            stats["lengths"],
-            stats["successes"],
-        )
+    def desenhar_graficos(self, data):
+        stats = data.get("stats", {})
+        recompensas = stats["rewards"]
+        tamanhos = stats["lengths"]
+        sucessos = stats["successes"]
         paths = stats.get("paths", {})
 
-        if self.canvas_widget:
-            self.canvas_widget.get_tk_widget().destroy()
-
-        # Criar uma grelha 2x2 para acomodar o mapa
-        fig, axs = plt.subplots(2, 2, figsize=(10, 8), dpi=100)
         window = max(1, len(recompensas) // 50)
+        
+        # ==========================================
+        # PÁGINA 1: MÉTRICAS DE TREINO
+        # ==========================================
+        if self.canvas_metricas:
+            self.canvas_metricas.get_tk_widget().destroy()
+            
+        fig_met, axs_met = plt.subplots(3, 1, figsize=(8, 8), dpi=100)
+        
+        axs_met[0].plot(recompensas, alpha=0.3, color='royalblue')
+        axs_met[0].plot(np.convolve(recompensas, np.ones(window)/window, mode='valid'), color='navy', linewidth=2)
+        axs_met[0].set_title('Recompensas Acumuladas', fontsize=11)
+        axs_met[0].grid(True, alpha=0.3)
+        
+        axs_met[1].plot(tamanhos, alpha=0.3, color='darkorange')
+        axs_met[1].plot(np.convolve(tamanhos, np.ones(window)/window, mode='valid'), color='saddlebrown', linewidth=2)
+        axs_met[1].set_title('Duração da Busca (Passos)', fontsize=11)
+        axs_met[1].grid(True, alpha=0.3)
+        
+        sucesso_acumulado = np.cumsum(sucessos) / np.arange(1, len(sucessos) + 1) * 100
+        axs_met[2].plot(sucesso_acumulado, color='forestgreen', linewidth=2)
+        axs_met[2].set_title('Taxa de Sucesso Acumulada (%)', fontsize=11)
+        axs_met[2].set_xlabel('Episódio', fontsize=10)
+        axs_met[2].grid(True, alpha=0.3)
+        
+        fig_met.tight_layout()
+        self.canvas_metricas = FigureCanvasTkAgg(fig_met, master=self.tab_metricas)
+        self.canvas_metricas.draw()
+        self.canvas_metricas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # 1. Recompensas (Topo Esquerda)
-        axs[0, 0].plot(recompensas, alpha=0.3, color="royalblue")
-        axs[0, 0].plot(
-            np.convolve(recompensas, np.ones(window) / window, mode="valid"),
-            color="navy",
-            linewidth=2,
-        )
-        axs[0, 0].set_title("Recompensas Acumuladas", fontsize=10)
-        axs[0, 0].grid(True, alpha=0.3)
-
-        # 2. MAPA DE ROTAS (Topo Direita)
-        axs[0, 1].set_title("Mapa de Navegação (Últimos Caminhos)", fontsize=10)
-        axs[0, 1].set_xlim(0, 1)  # As coordenadas gravadas estão normalizadas [0, 1]
-        axs[0, 1].set_ylim(0, 1)
-
+        # ==========================================
+        # PÁGINA 2: MAPA DE ROTAS
+        # ==========================================
+        if self.canvas_mapa:
+            self.canvas_mapa.get_tk_widget().destroy()
+            
+        fig_map, ax_map = plt.subplots(figsize=(8, 8), dpi=100)
+        ax_map.set_title('Evolução das Rotas de Navegação', fontsize=12)
+        ax_map.set_xlim(0, 1)
+        ax_map.set_ylim(0, 1)
+        
         if paths:
             eps_gravados = sorted(paths.keys())
-
-            # Desenha uma rota inicial (para ver como ele era no início)
-            if eps_gravados:
-                p_early = np.array(paths[eps_gravados[0]])
-                axs[0, 1].plot(
-                    p_early[:, 0],
-                    p_early[:, 1],
-                    color="red",
-                    alpha=0.3,
-                    label="Início do Treino",
-                )
-
-            # Desenha as últimas 5 rotas (para ver o comportamento ótimo)
-            for ep in eps_gravados[-5:]:
+            cmap = plt.get_cmap('RdYlGn') 
+            norm = mcolors.Normalize(vmin=min(eps_gravados), vmax=max(eps_gravados))
+            
+            for ep in eps_gravados:
                 p = np.array(paths[ep])
-                axs[0, 1].plot(p[:, 0], p[:, 1], color="forestgreen", alpha=0.6)
-
-            # Adiciona uma legenda genérica para a cor verde
-            axs[0, 1].plot(
-                [], [], color="forestgreen", label="Treino Final (Últimos Eps)"
-            )
-            axs[0, 1].legend(loc="lower left", fontsize=8)
+                cor = cmap(norm(ep))
+                ax_map.plot(p[:, 0], p[:, 1], color=cor, alpha=0.5, linewidth=1.5)
+            
+            sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+            sm.set_array([])
+            cbar = fig_map.colorbar(sm, ax=ax_map)
+            cbar.set_label('Número do Episódio', fontsize=10)
+            
+            # --- DESENHAR A ESTRELA ---
+            # Vai buscar os valores salvos (se não existirem usa os teus defaults de backup)
+            source_pos = data.get("source_pos", (20.0, 25.0))
+            world_size = data.get("world_size", (100.0, 50.0))
+            
+            sx_norm = source_pos[0] / world_size[0]
+            sy_norm = source_pos[1] / world_size[1]
+            
+            # Desenha a estrela com zorder=5 para ficar sempre por cima das linhas
+            ax_map.plot(sx_norm, sy_norm, marker='*', color='gold', markersize=22, 
+                        markeredgecolor='black', label='Origem da Pluma (Alvo)', zorder=5)
+            
+            ax_map.legend(loc='lower right', framealpha=0.9, fontsize=10)
+            # --------------------------
+            
         else:
-            axs[0, 1].text(
-                0.5,
-                0.5,
-                "Sem dados de GPS.\nTreina um modelo novo!",
-                ha="center",
-                va="center",
-                color="gray",
-            )
-        axs[0, 1].grid(True, alpha=0.3)
-
-        # 3. Passos por Episódio (Baixo Esquerda)
-        axs[1, 0].plot(tamanhos, alpha=0.3, color="darkorange")
-        axs[1, 0].plot(
-            np.convolve(tamanhos, np.ones(window) / window, mode="valid"),
-            color="saddlebrown",
-            linewidth=2,
-        )
-        axs[1, 0].set_title("Duração da Busca (Passos)", fontsize=10)
-        axs[1, 0].grid(True, alpha=0.3)
-
-        # 4. Taxa de Sucesso (Baixo Direita)
-        sucesso_acumulado = np.cumsum(sucessos) / np.arange(1, len(sucessos) + 1) * 100
-        axs[1, 1].plot(sucesso_acumulado, color="forestgreen", linewidth=2)
-        axs[1, 1].set_title("Taxa de Sucesso Acumulada (%)", fontsize=10)
-        axs[1, 1].set_xlabel("Episódio", fontsize=10)
-        axs[1, 1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-
-        # Ligar o Matplotlib ao Tkinter
-        self.canvas_widget = FigureCanvasTkAgg(fig, master=self.plot_frame)
-        self.canvas_widget.draw()
-        self.canvas_widget.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
+            ax_map.text(0.5, 0.5, "Sem dados de rotas.\nTreina um modelo novo!", 
+                        ha='center', va='center', color='gray', fontsize=14)
+            
+        ax_map.grid(True, alpha=0.3)
+        fig_map.tight_layout()
+        
+        self.canvas_mapa = FigureCanvasTkAgg(fig_map, master=self.tab_mapa)
+        self.canvas_mapa.draw()
+        self.canvas_mapa.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
 if __name__ == "__main__":
-    # Configurar estilo para parecer mais moderno que o Tkinter normal
     root = tk.Tk()
     style = ttk.Style()
-    style.theme_use("clam")  # Temas comuns: 'clam', 'alt', 'default', 'classic'
-
+    style.theme_use('clam')
     app = DashboardApp(root)
     root.mainloop()
+
+        

@@ -180,7 +180,6 @@ class Sinusoid_MeanderModel(MeanderModel):
             * np.sin(2 * np.pi * self.freqs * current_time + self.phases)
         )
 
-
         # Check if drift correction is enabled
         if self.drift_theta > 0:
             # If ENABLED, use the stateful, integrating model that pulls the velocity
@@ -554,16 +553,6 @@ class BioInspiredAgent(Agent):
 
 
 class PlumeRLWrapper(gym.Env):
-    """
-    Corrected Gymnasium environment for plume source localization with Q-Learning
-
-    Key improvements:
-    - ✓ Fixed observation space (was low=inf, high=inf)
-    - ✓ Proper state normalization (all values in [0, 1])
-    - ✓ Improved reward function (encourages exploration and gradient following)
-    - ✓ Consistent wind measurement (doesn't call update)
-    - ✓ Configuration validation
-    """
 
     metadata = {"render_modes": ["human", "rgb_array"]}
 
@@ -732,7 +721,6 @@ class PlumeRLWrapper(gym.Env):
         terminated = at_goal
         truncated = self.time >= self.config["max_time"]
 
-
         reward = self._calculate_reward(
             self.current_conc, self.prev_conc, visitas_nesta_celula, at_goal
         )
@@ -756,13 +744,10 @@ class PlumeRLWrapper(gym.Env):
         if at_goal:
             return self.reward_config["goal_reward"]
 
-
         reward = self.reward_config["step_penalty"]
-
 
         conc_diff = conc - prev_conc
         if conc_diff > 0:
-
             reward += self.reward_config["concentration_improvement"] * min(
                 conc_diff, 1.0
             )
@@ -851,7 +836,9 @@ class QLearningSimAgent(Agent):
                 np.clip(self.current_concentration / 10.0, 0, 1),
                 np.clip(self.measured_flow_direction[0] / 5.0, -1, 1),
                 np.clip(self.measured_flow_direction[1] / 5.0, -1, 1),
-            ],dtype=np.float32)
+            ],
+            dtype=np.float32,
+        )
 
         action = self.q_agent.choose_action(obs, greedy=True)
 
@@ -1156,7 +1143,6 @@ class Simulator:
 
         t_s_r = cv2.getTextSize(info_right, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)[0]
 
-
         # The color tuple (255, 255, 255) and thickness integer (1) are now in the correct order.
         cv2.putText(
             canvas,
@@ -1247,15 +1233,51 @@ if __name__ == "__main__":
     print("=" * 40)
 
     escolha = input("Escolha (1-2): ").strip()
-
     if escolha == "1":
         # TREINO
         env = PlumeRLWrapper(CONFIG)
-        episodios = int(input("Número de episódios para treinar (ex:500): ") or "500")
-
         agent = RLQLearningAgent(env)
-        agent.train(env, num_episodes=episodios, print_every=10)
+
+        print("\n--- OPÇÕES DE TREINO ---")
+        print(" 1. Iniciar Novo Treino (Do zero)")
+        print(" 2. Continuar Treino de um Modelo Existente")
+        sub_escolha = input("Escolha (1-2): ").strip()
+
+        if sub_escolha == "2":
+            pasta_modelos = "modelos"
+            modelos = glob.glob(os.path.join(pasta_modelos, "qlearning_plume_*.pkl"))
+            if not modelos:
+                print("Nenhum modelo encontrado. A iniciar um novo treino do zero...")
+            else:
+                modelos.sort(key=os.path.getmtime, reverse=True)
+                for i, m in enumerate(modelos):
+                    print(f" {i + 1}. {os.path.basename(m)}")
+
+                idx = input(
+                    f"\nQual modelo queres continuar a treinar? (1-{len(modelos)}): "
+                )
+                try:
+                    ficheiro_escolhido = modelos[int(idx) - 1]
+                    if agent.load(ficheiro_escolhido):
+                        print(
+                            f"\n[!] A continuar o treino a partir do episódio {len(agent.episode_rewards)}"
+                        )
+                        print(
+                            f"[!] Epsilon atual (taxa de exploração): {agent.epsilon:.4f}"
+                        )
+                except (ValueError, IndexError):
+                    print("Escolha inválida. A iniciar um novo treino do zero...")
+
+        episodios = int(
+            input("\nNúmero de episódios adicionais para treinar (ex:3000): ") or "3000"
+        )
+
+        # Inicia o processo (os prints mostrarão os totais acumulados)
+        agent.train(env, num_episodes=episodios, print_every=50)
         agent.save()
+
+        if CONFIG["visualize"]:
+            cv2.destroyAllWindows()
 
     elif escolha == "2":
         pasta_modelos = "modelos"
