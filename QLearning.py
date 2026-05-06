@@ -121,6 +121,27 @@ class QLearningAgent:
 
     def train(self, env, num_episodes=500, print_every=50):
         """Train the Q-Learning agent"""
+        import logging
+        pasta_logs = "logs"
+        os.makedirs(pasta_logs, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = os.path.join(pasta_logs, f"treino_{timestamp}.log")
+        
+        logger = logging.getLogger(f"QLearningTrain_{timestamp}")
+        logger.setLevel(logging.INFO)
+        fh = logging.FileHandler(log_filename, mode='w', encoding='utf-8')
+        fh.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+        logger.addHandler(fh)
+        
+        logger.info("=== INÍCIO DO TREINO ===")
+        logger.info(f"Episódios a treinar: {num_episodes}")
+        logger.info(f"Learning Rate: {self.lr}, Discount Factor (gamma): {self.gamma}")
+        logger.info(f"Epsilon Inicial: {self.epsilon}, Decay: {self.epsilon_decay}, Min: {self.min_epsilon}")
+        logger.info(f"State Bins: {self.state_bins}")
+        logger.info(f"Max possible states: {self.state_bins['x'] * self.state_bins['y'] * self.state_bins['conc'] * self.state_bins['wind']}")
+        
+        print(f"\n[INFO] Logs detalhados do treino a ser guardados em: {log_filename}")
+
         print(f"\n{'=' * 70}")
         print(f"  TRAINING Q-LEARNING — {num_episodes} episodes")
         print(
@@ -156,7 +177,15 @@ class QLearningAgent:
             # Track statistics
             self.episode_rewards.append(total_reward)
             self.episode_lengths.append(step)
-            self.success_history.append(1 if info.get("at_goal", False) else 0)
+            is_success = info.get("at_goal", False)
+            self.success_history.append(1 if is_success else 0)
+
+            # Log episode details
+            logger.info(
+                f"Episódio {ep_absoluto} | Reward: {total_reward:.2f} | "
+                f"Passos: {step} | Sucesso: {is_success} | "
+                f"Epsilon: {self.epsilon:.4f} | Q-States: {len(self.q_table)}"
+            )
 
             # Decay exploration
             if self.epsilon > self.min_epsilon:
@@ -180,6 +209,10 @@ class QLearningAgent:
                     f"ε: {self.epsilon:.4f} | "
                     f"Q-States: {len(self.q_table):>5}"
                 )
+
+        logger.info("=== FIM DO TREINO ===")
+        logger.removeHandler(fh)
+        fh.close()
 
     def save(self, filename=None):
         """

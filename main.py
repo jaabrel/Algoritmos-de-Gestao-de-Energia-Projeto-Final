@@ -955,10 +955,13 @@ class Simulator:
                         f"  > Sim Time: {self.simulation_time:.1f}s, Running Freq: {hz:.1f} Hz",
                         end="\r",
                     )
-                if self.config["visualize"] and self.config["real_time_pacing"]:
-                    wait_time = self.config["dt"] - elapsed_time
-                    if wait_time > 0:
-                        time.sleep(wait_time)
+                if self.config["visualize"]:
+                    if self.config["real_time_pacing"]:
+                        wait_time = self.config["dt"] - elapsed_time
+                        if wait_time > 0:
+                            time.sleep(wait_time)
+                    else:
+                        time.sleep(0.003)  # Atrasa ligeiramente a simulação (~300 FPS max)
             print()
             if self.logger:
                 self.logger.save()
@@ -974,6 +977,22 @@ class Simulator:
         )
         cv2.namedWindow("Odour Simulation", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("Odour Simulation", self.viz_w, self.viz_h)
+
+        self.agent_sprite = None
+        if os.path.exists("boat_sprite.png"):
+            img = cv2.imread("boat_sprite.png", cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                agent_radius = self.config.get("agent_config", {}).get("agent_radius", 0.5)
+                # O barco tem que parecer ligeiramente maior que o circulo normal
+                sprite_size_px = int((agent_radius * 8) / self.world_w * self.viz_w)
+                h, w = img.shape[:2]
+                if w > h:
+                    new_w = sprite_size_px
+                    new_h = int(h * (new_w / w))
+                else:
+                    new_h = sprite_size_px
+                    new_w = int(w * (new_h / h))
+                self.agent_sprite = cv2.resize(img, (new_w, new_h))
 
     def _world_to_pixel(self, pos):
         px = int(pos[0] / self.world_w * self.viz_w)
@@ -1117,11 +1136,40 @@ class Simulator:
         )
         agent_px = self._world_to_pixel(self.agent.pos)
         agent_radius_px = max(2, int(self.agent.radius / self.world_w * self.viz_w))
-        cv2.circle(canvas, agent_px, agent_radius_px, agent_color, 2, cv2.LINE_AA)
-        arrow_end_px = self._world_to_pixel(
-            self.agent.pos + self.agent.direction * self.agent.radius * 2.5
-        )
-        cv2.arrowedLine(canvas, agent_px, arrow_end_px, (255, 255, 0), 2, cv2.LINE_AA)
+
+        if hasattr(self, 'agent_sprite') and self.agent_sprite is not None:
+            sprite = self.agent_sprite
+            
+            # Não rodar a imagem, manter original
+            rotated_sprite = sprite
+            bound_w = sprite.shape[1]
+            bound_h = sprite.shape[0]
+            
+            if rotated_sprite.shape[2] == 4:
+                bgr = rotated_sprite[:, :, :3]
+                alpha = rotated_sprite[:, :, 3] / 255.0
+            else:
+                bgr = rotated_sprite
+                alpha = np.ones(bgr.shape[:2])
+                
+            top_left_x = agent_px[0] - bound_w // 2
+            top_left_y = agent_px[1] - bound_h // 2
+            
+            y1, y2 = max(0, top_left_y), min(canvas.shape[0], top_left_y + bound_h)
+            x1, x2 = max(0, top_left_x), min(canvas.shape[1], top_left_x + bound_w)
+            
+            y1o, y2o = max(0, -top_left_y), min(bound_h, canvas.shape[0] - top_left_y)
+            x1o, x2o = max(0, -top_left_x), min(bound_w, canvas.shape[1] - top_left_x)
+            
+            if y1 < y2 and x1 < x2:
+                alpha_crop = alpha[y1o:y2o, x1o:x2o, np.newaxis]
+                canvas[y1:y2, x1:x2] = (alpha_crop * bgr[y1o:y2o, x1o:x2o] + (1 - alpha_crop) * canvas[y1:y2, x1:x2]).astype(np.uint8)
+        else:
+            cv2.circle(canvas, agent_px, agent_radius_px, agent_color, 2, cv2.LINE_AA)
+            arrow_end_px = self._world_to_pixel(
+                self.agent.pos + self.agent.direction * self.agent.radius * 2.5
+            )
+            cv2.arrowedLine(canvas, agent_px, arrow_end_px, (255, 255, 0), 2, cv2.LINE_AA)
 
         # 5. Draw updated text info
         font_scale = 0.6
