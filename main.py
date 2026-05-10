@@ -158,38 +158,32 @@ class Sinusoid_MeanderModel(MeanderModel):
             return
 
         low_freq = wind_speed / self.L
-        high_freq = 100 * low_freq
-        self.freqs = np.logspace(
-            np.log10(low_freq), np.log10(high_freq), self.num_harmonics
-        )
-
-        wavenumbers = 2 * np.pi * self.freqs / wind_speed
-        energy_spectrum = (self.v_var * (2 * self.L / np.pi)) / (
-            1 + (wavenumbers * self.L) ** 2
-        ) ** (5 / 6)
-
-        freq_spectrum = energy_spectrum * (2 * np.pi / wind_speed)
-        df = np.gradient(self.freqs)
-        self.amplitudes = np.sqrt(2 * freq_spectrum * df)
-        self.phases = np.random.rand(self.num_harmonics) * 2 * np.pi
+        
+        if self.num_harmonics == 1:
+            self.freqs = np.array([low_freq])
+            self.amplitudes = np.array([self.v_var])
+            self.phases = np.array([0.0])
+        else:
+            high_freq = 100 * low_freq
+            self.freqs = np.logspace(np.log10(low_freq), np.log10(high_freq), self.num_harmonics)
+            wavenumbers = 2 * np.pi * self.freqs / wind_speed
+            energy_spectrum = (self.v_var * (2 * self.L / np.pi)) / (1 + (wavenumbers * self.L) ** 2) ** (5 / 6)
+            freq_spectrum = energy_spectrum * (2 * np.pi / wind_speed)
+            df = np.gradient(self.freqs)
+            self.amplitudes = np.sqrt(2 * freq_spectrum * df)
+            self.phases = np.random.rand(self.num_harmonics) * 2 * np.pi
 
     def update(self, dt, current_time):
-        # Calculate the instantaneous target velocity from the sum of sines
         target_vy = np.sum(
             self.amplitudes
             * np.sin(2 * np.pi * self.freqs * current_time + self.phases)
         )
 
-        # Check if drift correction is enabled
         if self.drift_theta > 0:
-            # If ENABLED, use the stateful, integrating model that pulls the velocity
-            # back to the mean, preventing long-term drift.
             drift_correction_force = -self.drift_theta * self.meandering_vy
             self.meandering_vy += (drift_correction_force + target_vy) * dt
             return self.meandering_vy
         else:
-            # If DISABLED, return the original, stateless calculation.
-            # This will behave identically to the version before drift correction was added.
             return target_vy
 
 
@@ -257,6 +251,7 @@ class FilamentPlume:
         self.source_pos = np.array(config["source_position"])
         self.puffs_array = np.empty((0, 5), dtype=np.float32)
         self.time_since_last_puff = 0.0
+        self.cleanup_counter = 0
 
         model_name = self.config.get("meander_model", "ou")
         if model_name == "sum_of_sinusoids":
@@ -290,20 +285,22 @@ class FilamentPlume:
                 self.config["turbulence_intensity"],
                 self.config["puff_decay_rate"],
             )
-            min_mass = self.config["initial_puff_mass"] * 0.01
-            alive_mask = (self.puffs_array[:, 3] > min_mass) & (
-                self.puffs_array[:, 4] < self.config["max_time"]
-            )
-            self.puffs_array = self.puffs_array[alive_mask]
-
+            self.cleanup_counter
+            if self.cleanup_counter >= 10:
+                min_mass = self.config["initial_puff_mass"] * 0.01
+                alive_mask = (self.puffs_array[:, 3] > min_mass) & (
+                    self.puffs_array[:, 4] < self.config["max_time"]
+                )
+                self.puffs_array = self.puffs_array[alive_mask]
+                self.cleanup_counter = 0
 
 class Agent:
     """Base class for a searching agent."""
 
     def __init__(self, config):
         self.config = config
-        self.radius = self.config["agent_radius"]
-        self.speed = self.config["agent_speed"]
+        self.radius = self.config["agent_config"]["agent_radius"]
+        self.speed = self.config["agent_config"]["agent_speed"]
         self.measured_flow_direction = np.array([1.0, 0.0])
         self.reset()
 
@@ -369,189 +366,6 @@ class Agent:
         raise NotImplementedError("This method should be implemented by a subclass.")
 
 
-class SimpleUpwindAgent(Agent):
-    """A simple agent for basic testing."""
-
-    def __init__(self, config):
-        self.state, self.cast_direction, self.last_hit_pos = None, None, None
-        super().__init__(config)
-
-    def reset(self):
-        super().reset()
-        self.state, self.cast_direction, self.last_hit_pos = "casting", 1, None
-
-    def run_search_algorithm(self, dt):
-        concentration_threshold = self.config.get("agent_concentration_threshold", 1.0)
-        surge_len = self.config.get("surge_length", 5.0)
-        cast_len = self.config.get("cast_length", 8.0)
-
-        custom_data = {"state": self.state}
-        if self.current_concentration > concentration_threshold:
-            self.state = "surging"
-            self.last_hit_pos = self.pos.copy()
-            upwind_vec = -np.array(self.config["mean_wind_velocity"])
-            target_pos = self.pos + upwind_vec * surge_len
-        else:
-            if self.state == "surging":
-                self.state, self.cast_direction = "casting", self.cast_direction * -1
-            crosswind_vec = np.array(
-                [
-                    -self.config["mean_wind_velocity"][1],
-                    self.config["mean_wind_velocity"][0],
-                ]
-            )
-            target_pos = self.pos + (crosswind_vec * self.cast_direction * cast_len)
-        return target_pos, custom_data
-
-
-class BioInspiredAgent(Agent):
-    """A more robust agent using decision hysteresis and an expanding cast search pattern."""
-
-    def __init__(self, config):
-        self.main_config = config
-        super().__init__(config)
-
-    def reset(self):
-        super().reset()
-        self.phase, self.behavior, self.state = "SEARCHING", "SEARCHING", "DECIDING"
-        self.target_pos, self.cast_direction, self.search_direction = None, 1, 1
-        self.consecutive_hits, self.consecutive_misses = 0, 0
-        self.current_cast_length = self.config.get("cast_length", 7.0)
-
-    def _compute_zig_zag_target(self, length, angle_deg, direction_sign):
-        flow_norm = np.linalg.norm(self.measured_flow_direction)
-        if flow_norm < 1e-6:
-            return self.pos
-        upwind_dir = -self.measured_flow_direction / flow_norm
-        angle_rad = np.deg2rad(angle_deg * direction_sign)
-        rot_matrix = np.array(
-            [
-                [np.cos(angle_rad), -np.sin(angle_rad)],
-                [np.sin(angle_rad), np.cos(angle_rad)],
-            ]
-        )
-        return self.pos + (rot_matrix @ upwind_dir) * length
-
-    def _set_search_target(self):
-        print(f"BEHAVIOR: Searching (direction: {self.search_direction})")
-        self.behavior = "SEARCHING"
-        potential_target = self._compute_zig_zag_target(
-            self.config["search_length"],
-            self.config["search_angle"],
-            self.search_direction,
-        )
-        if not (0 < potential_target[1] < self.main_config["world_height"]):
-            print("  > Search target out of bounds. Inverting direction.")
-            self.search_direction *= -1
-            self.target_pos = self._compute_zig_zag_target(
-                self.config["search_length"],
-                self.config["search_angle"],
-                self.search_direction,
-            )
-        else:
-            self.target_pos = potential_target
-        self.state = "MOVING_TO_TARGET"
-
-    def _set_cast_target(self):
-        print(
-            f"BEHAVIOR: Casting (direction: {self.cast_direction}, length: {self.current_cast_length:.2f})"
-        )
-        self.behavior = "CASTING"
-        potential_target = self._compute_zig_zag_target(
-            self.current_cast_length, self.config["cast_angle"], self.cast_direction
-        )
-        if not (0 < potential_target[1] < self.main_config["world_height"]):
-            print("  > Cast target out of bounds. Inverting direction.")
-            self.cast_direction *= -1
-            self.target_pos = self._compute_zig_zag_target(
-                self.current_cast_length, self.config["cast_angle"], self.cast_direction
-            )
-        else:
-            self.target_pos = potential_target
-        self.state = "MOVING_TO_TARGET"
-
-    def _set_surge_target(self):
-        print("BEHAVIOR: Surging")
-        self.behavior = "SURGING"
-        self.current_cast_length = self.config.get("cast_length", 7.0)
-        flow_norm = np.linalg.norm(self.measured_flow_direction)
-        if flow_norm > 1e-6:
-            upwind_dir = -self.measured_flow_direction / flow_norm
-            self.target_pos = self.pos + upwind_dir * self.config["surge_length"]
-        self.state = "MOVING_TO_TARGET"
-
-    def run_search_algorithm(self, dt):
-        is_hit = (
-            self.current_concentration > self.config["agent_concentration_threshold"]
-        )
-        if is_hit:
-            self.consecutive_hits, self.consecutive_misses = (
-                self.consecutive_hits + 1,
-                0,
-            )
-        else:
-            self.consecutive_misses, self.consecutive_hits = (
-                self.consecutive_misses + 1,
-                0,
-            )
-        confirmation_steps = self.config.get("confirmation_steps", 1)
-
-        if self.phase == "SEARCHING" and self.consecutive_hits >= confirmation_steps:
-            print(
-                f"PLUME FOUND ({self.consecutive_hits} consecutive hits)! Switching to TRACKING phase."
-            )
-            self.phase, self.state = "TRACKING", "DECIDING"
-        elif (
-            self.phase == "TRACKING"
-            and self.behavior == "SURGING"
-            and self.consecutive_misses >= confirmation_steps
-        ):
-            print(
-                f"PLUME LOST ({self.consecutive_misses} consecutive misses)! Switching to CAST."
-            )
-            self.state = "DECIDING"
-        elif (
-            self.phase == "TRACKING"
-            and self.behavior == "CASTING"
-            and self.consecutive_hits >= confirmation_steps
-        ):
-            print(
-                f"PLUME RE-ACQUIRED ({self.consecutive_hits} consecutive hits)! Switching to SURGE."
-            )
-            self.state = "DECIDING"
-
-        if self.state == "DECIDING":
-            if self.phase == "SEARCHING":
-                self._set_search_target()
-            elif self.phase == "TRACKING":
-                if self.consecutive_hits > 0:
-                    self._set_surge_target()
-                else:
-                    if self.behavior == "CASTING":
-                        self.current_cast_length *= 1.0 + self.config.get(
-                            "cast_length_increase_factor", 0.1
-                        )
-                        print(
-                            f"  > Cast failed. Increasing cast length to {self.current_cast_length:.2f}"
-                        )
-                        self.cast_direction *= -1
-                    self._set_cast_target()
-        elif self.state == "MOVING_TO_TARGET":
-            if (
-                self.target_pos is None
-                or np.linalg.norm(self.pos - self.target_pos) < 0.5
-            ):
-                self.state, self.target_pos = "DECIDING", None
-
-        custom_data = {
-            "phase": self.phase,
-            "behavior": self.behavior,
-            "hits": self.consecutive_hits,
-            "misses": self.consecutive_misses,
-        }
-        return self.target_pos, custom_data
-
-
 class PlumeRLWrapper(gym.Env):
 
     metadata = {"render_modes": ["human", "rgb_array"]}
@@ -581,12 +395,19 @@ class PlumeRLWrapper(gym.Env):
             "revisit_threshold": 1.0,  #
             "revisit_penalty": -0.2,  # Mild penalty for revisiting
             "plume_detection_bonus": 0.3,
-            "upwind_bonus": 1.0,  # Bonus for moving upwind
+            "upwind_bonus": 4.0,  # Bonus for moving upwind
             "goal_reward": 500.0,  # Reward for reaching goal
         }
 
         self.conc_max = 10.0  # Expected maximum concentration
         self.flow_max = 5.0  # Expected maximum flow magnitude
+
+        self._cached_mean_wind = np.array(self.config["mean_wind_velocity"])
+        self._cached_wind_norm = np.linalg.norm(self._cached_mean_wind)
+        if self._cached_wind_norm > 1e-6:
+            self._cached_upwind_dir = -self._cached_mean_wind / self._cached_wind_norm
+        else:
+            self._cached_upwind_dir = np.array([0.0, 0.0])
 
         # State tracking
         self.plume = None
@@ -745,16 +566,10 @@ class PlumeRLWrapper(gym.Env):
             return self.reward_config["goal_reward"]
 
         reward = self.reward_config["step_penalty"]
-
-        conc_diff = conc - prev_conc
-        if conc_diff > 0:
-            reward += self.reward_config["concentration_improvement"] * min(
-                conc_diff, 1.0
-            )
-        elif conc_diff < 0 and conc > 0:
-            # Small penalty for moving away from plume
-            reward += self.reward_config["concentration_decrease"]
-
+        
+        if self.steps_in_current_cell > 50:
+            reward -= 0.1
+        
         # Mild revisit penalty (allow exploration)
         if visitas_nesta_celula > self.reward_config["revisit_threshold"]:
             reward += self.reward_config["revisit_penalty"]
@@ -765,18 +580,19 @@ class PlumeRLWrapper(gym.Env):
             reward += self.reward_config["plume_detection_bonus"]
 
             # Upwind navigation bonus
-            mean_wind = np.array(self.config["mean_wind_velocity"])
-            if np.linalg.norm(mean_wind) > 1e-6:
-                upwind_dir = -mean_wind / np.linalg.norm(mean_wind)
+            if self._cached_wind_norm > 1e-6:
                 movement = self.pos - self.prev_pos
                 movement_norm = np.linalg.norm(movement)
 
                 if movement_norm > 1e-6:
                     movement_dir = movement / movement_norm
-                    upwind_progress = np.dot(movement_dir, upwind_dir)
+                    upwind_progress = np.dot(movement_dir, self._cached_upwind_dir)
 
                     if upwind_progress > 0:
                         reward += self.reward_config["upwind_bonus"] * upwind_progress
+                    else:
+                        reward -= (self.reward_config["upwind_bonus"] -1) * abs(upwind_progress)
+
 
         return reward
 
@@ -822,11 +638,8 @@ class QLearningSimAgent(Agent):
 
         chosen_model = self.config.get("model_to_load", "qlearning_plume.pkl")
 
-        try:
-            self.q_agent.load(chosen_model)
-            print(f"\n[+] Model '{chosen_model}' loaded")
-        except:
-            print(f"\n[-] Model '{chosen_model}' not found")
+        self.q_agent.load(chosen_model)
+        print(f"\n[+] Model '{chosen_model}' loaded")
 
     def run_search_algorithm(self, dt):
         obs = np.array(
@@ -866,11 +679,7 @@ class Simulator:
 
     def __init__(self, config):
         self.config = config
-        agent_class_name = config["agent_class"]
-        if agent_class_name not in AGENT_REGISTRY:
-            raise ValueError(f"Agent class '{agent_class_name}' not found.")
-        agent_full_config = {**config, **config.get("agent_config", {})}
-        self.agent = AGENT_REGISTRY[agent_class_name](agent_full_config)
+        self.agent = QLearningSimAgent(config)
         self.plume, self.logger = None, None
         self.simulation_time, self.current_experiment = 0.0, 0
         self.loop_time_ema, self.ema_alpha = 0.0, 0.1
@@ -974,6 +783,8 @@ class Simulator:
         )
         cv2.namedWindow("Odour Simulation", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("Odour Simulation", self.viz_w, self.viz_h)
+        blank_canvas = np.zeros((self.viz_h, self.viz_w, 3), dtype=np.uint8)
+        self.static_background = self._draw_axes(blank_canvas)
 
     def _world_to_pixel(self, pos):
         px = int(pos[0] / self.world_w * self.viz_w)
@@ -1078,10 +889,7 @@ class Simulator:
 
     def _draw(self):
         # 1. Create a blank canvas
-        canvas = np.zeros((self.viz_h, self.viz_w, 3), dtype=np.uint8)
-
-        # Draw axes onto the canvas first
-        canvas = self._draw_axes(canvas)
+        canvas = self.static_background.copy()
 
         # 2. Draw puffs
         if self.plume.puffs_array.shape[0] > 0:
@@ -1179,37 +987,30 @@ if __name__ == "__main__":
         "world_width": 100.0,
         "world_height": 50.0,
         "source_position": (20.0, 25.0),
-        "emission_rate": 10,
-        "initial_puff_mass": 300.0,
-        "puff_decay_rate": 0.05,
+        "emission_rate": 50,
+        "initial_puff_mass": 800.0,
+        "puff_decay_rate": 0.02,
         "concentration_model": "gaussian",
         "num_experiments": 10,
         "plume_stabilization_time": 1.0,
         "agent_start_region_center": (60.0, 25.0),
         "agent_start_region_radius": 2.0,
         # --- MEANDER MODEL CONFIGURATION ---
-        "meander_model": "ou",
+        "meander_model": "sum_of_sinusoids",
         "ou_meander_config": {
             "intensity": 0.1,
             "timescale": 0.1,
         },
         "sinusoid_meander_config": {
-            "num_harmonics": 10,
-            "v_var": 0.8,  #
-            "integral_length_scale_L": 20.0,
-            "drift_correction_timescale": 10,
+            "num_harmonics": 1,
+            "v_var": 1.5,
+            "integral_length_scale_L": 15.0,
+            "drift_correction_timescale": 0,
         },
-        # 'sinusoid_meander_config': {
-        # 'num_harmonics': 10,
-        # 'v_var': 0.4,  # <-- Strong, but not excessive
-        # 'integral_length_scale_L': 25.0,
-        # 'drift_correction_timescale': 45.0
-        # },
         # --- TURBULENCE INTENSITY ---
         "turbulence_intensity": 0.1,
-        # 'turbulence_intensity': 0.7,
         # --- MEAN WIND VELOCITY ---
-        "mean_wind_velocity": (0.5, 0),
+        "mean_wind_velocity": (1.0, 0),
         "agent_class": "QLearingAgent",
         "agent_config": {
             "agent_radius": 0.5,
@@ -1297,7 +1098,6 @@ if __name__ == "__main__":
 
             idx = input(f"\nQual modelo queres testar? (1-{len(modelos)}): ")
             try:
-                # Pegar no caminho completo escolhido (ex: modelos/qlearning_plume_123.pkl)
                 ficheiro_escolhido = modelos[int(idx) - 1]
 
                 CONFIG["agent_class"] = "QLearningAgent"

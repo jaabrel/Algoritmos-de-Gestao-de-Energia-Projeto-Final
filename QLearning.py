@@ -37,8 +37,8 @@ class QLearningAgent:
         self.min_epsilon = min_exploration_rate
 
         self.state_bins = state_bins or {
-            "x": 20,  # Position X bins
-            "y": 10,  # Position Y bins
+            "x": 5,
+            "y": 5,
             "conc": 3,  # Concentration bins (low, medium, high)
             "wind": 4,  # Wind direction bins (4 cardinal directions)
         }
@@ -59,18 +59,14 @@ class QLearningAgent:
 
         """
         state = np.asarray(state, dtype=np.float32)
-
-        # Position binning
+        
         x_b = int(np.clip(state[0] * self.state_bins["x"], 0, self.state_bins["x"] - 1))
         y_b = int(np.clip(state[1] * self.state_bins["y"], 0, self.state_bins["y"] - 1))
 
-        # Concentration binning
-        # Assumes concentration is normalized to [0, 1]
         conc = state[2]
-
-        if conc <= 0.33:
+        if conc <= 0.05:
             c_b = 0  # Low concentration
-        elif conc <= 0.67:
+        elif conc <= 0.4:
             c_b = 1  # Medium concentration
         else:
             c_b = 2  # High concentration
@@ -123,12 +119,8 @@ class QLearningAgent:
         """Train the Q-Learning agent"""
         print(f"\n{'=' * 70}")
         print(f"  TRAINING Q-LEARNING — {num_episodes} episodes")
-        print(
-            f"  State bins: {self.state_bins['x']}×{self.state_bins['y']}×{self.state_bins['conc']}×{self.state_bins['wind']}"
-        )
-        print(
-            f"  Max possible states: {self.state_bins['x'] * self.state_bins['y'] * self.state_bins['conc'] * self.state_bins['wind']}"
-        )
+        print(f" Sensores: Concentração ({self.state_bins['conc']} níveis) x Vento ({self.state_bins['wind']} direções)")
+        print(f" Max possible states: {self.state_bins['conc'] * self.state_bins['wind']}")
         print(f"{'=' * 70}\n")
 
         episodios_iniciais = len(self.episode_rewards)
