@@ -576,13 +576,13 @@ class PlumeRLWrapper(gym.Env):
         )
         self.reward_config = {
             "step_penalty": -0.05,
-            "concentration_improvement": 1.0,
-            "concentration_decrease": -0.05,
-            "revisit_threshold": 1.0,  #
-            "revisit_penalty": -0.2,  # Mild penalty for revisiting
-            "plume_detection_bonus": 0.3,
-            "upwind_bonus": 1.0,  # Bonus for moving upwind
-            "goal_reward": 500.0,  # Reward for reaching goal
+            "anti_stall_penalty": -0.2,
+            "perimeter_bonus": 1.0,
+            "deep_plume_penalty": -0.5,
+            "lost_plume_penalty": -0.5,
+            "exploration_bonus": 0.5,
+            "revisit_penalty": -0.2,
+            "goal_reward": 1000.0,
         }
 
         self.conc_max = 10.0  # Expected maximum concentration
@@ -649,6 +649,9 @@ class PlumeRLWrapper(gym.Env):
         self.steps_in_current_cell = 0
         self.prev_conc = 0.0
         self.current_conc = 0.0
+        self.first_detection_pos = None
+        self.has_moved_away = False
+        self.path_length = 0.0
 
         # Stabilize plume
         for _ in range(
@@ -706,32 +709,23 @@ class PlumeRLWrapper(gym.Env):
 
         visitas_nesta_celula = self.visit_map.get(new_cell, 1)
 
-        self.prev_conc = self.current_conc
         self.current_conc = calculate_concentration_gaussian_numba(
             self.pos, self.plume.puffs_array
         )
+        
+        plume_cells_visited = sum(1 for cell, visits in self.visit_map.items()
+        if self.current_conc > 0.01 and visits > 0)
 
-        # Check goal
-        dist_to_source = np.linalg.norm(
-            self.pos - np.array(self.config["source_position"])
-        )
-        at_goal = dist_to_source < self.config["agent_config"]["success_distance"]
+        mapping_threshold = 50
+        terminated = plume_cells_visited >= mapping_threshold
+        truncated = self.time >= self.config['max_time']
 
-        # Termination conditions
-        terminated = at_goal
-        truncated = self.time >= self.config["max_time"]
+        reward = self._calculate_reward(self.current_conc, self.prev_conc, visitas_nesta_celula)
+        return self._get_obs(), reward, terminated, truncated, {"plume_mapped": terminated}
 
-        reward = self._calculate_reward(
-            self.current_conc, self.prev_conc, visitas_nesta_celula, at_goal
-        )
-
-        return self._get_obs(), reward, terminated, truncated, {"at_goal": at_goal}
-
-    def _calculate_reward(self, conc, prev_conc, visitas_nesta_celula, at_goal):
+    def _calculate_reward(self, conc, prev_conc, visitas_nesta_celula):
         """
         Calculate reward for current step
-
-
 
         Args:
             conc: Current concentration
@@ -741,43 +735,21 @@ class PlumeRLWrapper(gym.Env):
         Returns:
             Reward value
         """
-        if at_goal:
-            return self.reward_config["goal_reward"]
-
+        
         reward = self.reward_config["step_penalty"]
 
-        conc_diff = conc - prev_conc
-        if conc_diff > 0:
-            reward += self.reward_config["concentration_improvement"] * min(
-                conc_diff, 1.0
-            )
-        elif conc_diff < 0 and conc > 0:
-            # Small penalty for moving away from plume
-            reward += self.reward_config["concentration_decrease"]
+        if conc > 0.01:
+            reward += 0.1
+            if visitas_nesta_celula == 1:
+                reward += self.reward_config["exploration_bonus"] * 2
+            elif visitas_nesta_celula > 5:
+                reward += self.reward_config["revisit_penalty"]
+        else:
+            reward += self.reward_config["lost_plume_penalty"]
 
-        # Mild revisit penalty (allow exploration)
-        if visitas_nesta_celula > self.reward_config["revisit_threshold"]:
-            reward += self.reward_config["revisit_penalty"]
-
-        # Plume detection bonus
-        threshold = self.config["agent_config"]["agent_concentration_threshold"]
-        if conc > threshold:
-            reward += self.reward_config["plume_detection_bonus"]
-
-            # Upwind navigation bonus
-            mean_wind = np.array(self.config["mean_wind_velocity"])
-            if np.linalg.norm(mean_wind) > 1e-6:
-                upwind_dir = -mean_wind / np.linalg.norm(mean_wind)
-                movement = self.pos - self.prev_pos
-                movement_norm = np.linalg.norm(movement)
-
-                if movement_norm > 1e-6:
-                    movement_dir = movement / movement_norm
-                    upwind_progress = np.dot(movement_dir, upwind_dir)
-
-                    if upwind_progress > 0:
-                        reward += self.reward_config["upwind_bonus"] * upwind_progress
-
+        if self.steps_in_current_cell > 50:
+            reward += self.reward_config["anti_stall_penalty"]
+        
         return reward
 
     def _get_obs(self):
@@ -1188,7 +1160,7 @@ if __name__ == "__main__":
         "agent_start_region_center": (60.0, 25.0),
         "agent_start_region_radius": 2.0,
         # --- MEANDER MODEL CONFIGURATION ---
-        "meander_model": "ou",
+        "meander_model": "OU",
         "ou_meander_config": {
             "intensity": 0.1,
             "timescale": 0.1,
@@ -1209,7 +1181,7 @@ if __name__ == "__main__":
         "turbulence_intensity": 0.1,
         # 'turbulence_intensity': 0.7,
         # --- MEAN WIND VELOCITY ---
-        "mean_wind_velocity": (0.5, 0),
+        "mean_wind_velocity": (1, 0),
         "agent_class": "QLearingAgent",
         "agent_config": {
             "agent_radius": 0.5,
