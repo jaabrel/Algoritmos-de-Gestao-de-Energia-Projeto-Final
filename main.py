@@ -1138,13 +1138,15 @@ class Simulator:
 
 if __name__ == "__main__":
     import glob
+    import json
+    import os
 
-    CONFIG = {
+    DEFAULT_CONFIG = {
         "dt": 0.1,
         "max_time": 200.0,
         "save_path": "experiments",
         "experiment_name": "bio_inspired_test",
-        "visualize": True,
+        "visualize": False,
         "real_time_pacing": False,
         "viz_width": 1200,
         "viz_height": 600,
@@ -1197,6 +1199,15 @@ if __name__ == "__main__":
             "confirmation_steps": 3,
         },
     }
+
+    config_file_path = "config.json"
+
+    if not os.path.exists(config_file_path):
+        with open(config_file_path, "w") as f:
+            json.dump(DEFAULT_CONFIG, f, indent=4)
+
+    with open(config_file_path, "r") as f:
+        CONFIG = json.load(f)
 
     print("=" * 40)
     print(" OPÇÕES DE TREINO:")

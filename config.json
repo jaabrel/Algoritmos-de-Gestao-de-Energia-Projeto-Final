@@ -1,0 +1,57 @@
+{
+    "dt": 0.1,
+    "max_time": 200.0,
+    "save_path": "experiments",
+    "experiment_name": "bio_inspired_test",
+    "visualize": false,
+    "real_time_pacing": false,
+    "viz_width": 1200,
+    "viz_height": 600,
+    "world_width": 100.0,
+    "world_height": 50.0,
+    "source_position": [
+        20.0,
+        25.0
+    ],
+    "emission_rate": 10,
+    "initial_puff_mass": 300.0,
+    "puff_decay_rate": 0.05,
+    "concentration_model": "gaussian",
+    "num_experiments": 10,
+    "plume_stabilization_time": 1.0,
+    "agent_start_region_center": [
+        60.0,
+        25.0
+    ],
+    "agent_start_region_radius": 2.0,
+    "meander_model": "OU",
+    "ou_meander_config": {
+        "intensity": 0.1,
+        "timescale": 0.1
+    },
+    "sinusoid_meander_config": {
+        "num_harmonics": 10,
+        "v_var": 0.8,
+        "integral_length_scale_L": 20.0,
+        "drift_correction_timescale": 10
+    },
+    "turbulence_intensity": 0.1,
+    "mean_wind_velocity": [
+        1,
+        0
+    ],
+    "agent_class": "QLearingAgent",
+    "agent_config": {
+        "agent_radius": 0.5,
+        "agent_speed": 3.0,
+        "success_distance": 2.0,
+        "agent_concentration_threshold": 1.0,
+        "surge_length": 4.0,
+        "cast_length": 6.0,
+        "cast_angle": 60.0,
+        "search_length": 8.0,
+        "search_angle": 75.0,
+        "cast_length_increase_factor": 0.1,
+        "confirmation_steps": 3
+    }
+}
