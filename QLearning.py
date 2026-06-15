@@ -41,6 +41,7 @@ class QLearningAgent:
             "y": 10,  # Position Y bins
             "conc": 3,  # Concentration bins (low, medium, high)
             "wind": 4,  # Wind direction bins (4 cardinal directions)
+            "battery": 3,  # Battery remaining bins (low, medium, high)
         }
 
         self.q_table = {}
@@ -54,7 +55,7 @@ class QLearningAgent:
         """
         Convert continuous state to discrete state key for Q-table indexing
 
-        State format: [norm_x, norm_y, conc, flow_x, flow_y, mission_state]
+        State format: [norm_x, norm_y, conc, flow_x, flow_y, mission_state, battery_level]
         All values should be normalized to [0, 1] range (or close to it)
 
         """
@@ -81,18 +82,33 @@ class QLearningAgent:
         wind_dir = int(np.round(angle / (np.pi / 2))) % 4
 
         # Dynamic state binning
-        # For backward compatibility: if a Q-table is loaded and its keys are 4-tuples,
-        # we strip the mission_state_bin and return a 4-tuple.
+        # For backward compatibility: if a Q-table is loaded and its keys are 4-tuples or 5-tuples,
+        # we strip the mission_state_bin and/or battery_bin and return a matching tuple.
         if self.q_table:
             first_key = next(iter(self.q_table.keys()))
             if len(first_key) == 4:
                 return (x_b, y_b, c_b, wind_dir)
+            elif len(first_key) == 5:
+                mission_state_bin = 0
+                if len(state) > 5:
+                    mission_state_bin = int(np.round(state[5]))
+                return (x_b, y_b, c_b, wind_dir, mission_state_bin)
 
         mission_state_bin = 0
         if len(state) > 5:
             mission_state_bin = int(np.round(state[5]))
 
-        return (x_b, y_b, c_b, wind_dir, mission_state_bin)
+        battery_bin = 0
+        if len(state) > 6:
+            battery_val = state[6]
+            if battery_val <= 0.3:
+                battery_bin = 0
+            elif battery_val <= 0.7:
+                battery_bin = 1
+            else:
+                battery_bin = 2
+
+        return (x_b, y_b, c_b, wind_dir, mission_state_bin, battery_bin)
 
     def choose_action(self, state, greedy: bool = False) -> int:
 
@@ -153,7 +169,7 @@ class QLearningAgent:
         logger.info(f"Learning Rate: {self.lr}, Discount Factor (gamma): {self.gamma}")
         logger.info(f"Epsilon Inicial: {self.epsilon}, Decay: {self.epsilon_decay}, Min: {self.min_epsilon}")
         logger.info(f"State Bins: {self.state_bins}")
-        logger.info(f"Max possible states: {self.state_bins['x'] * self.state_bins['y'] * self.state_bins['conc'] * self.state_bins['wind']}")
+        logger.info(f"Max possible states: {self.state_bins['x'] * self.state_bins['y'] * self.state_bins['conc'] * self.state_bins['wind'] * self.state_bins.get('battery', 3)}")
         
         print(f"\n[INFO] Logs detalhados do treino a ser guardados em: {log_filename}")
 
@@ -163,7 +179,7 @@ class QLearningAgent:
             f"  State bins: {self.state_bins['x']}×{self.state_bins['y']}×{self.state_bins['conc']}×{self.state_bins['wind']}"
         )
         print(
-            f"  Max possible states: {self.state_bins['x'] * self.state_bins['y'] * self.state_bins['conc'] * self.state_bins['wind']}"
+            f"  Max possible states: {self.state_bins['x'] * self.state_bins['y'] * self.state_bins['conc'] * self.state_bins['wind'] * self.state_bins.get('battery', 3)}"
         )
         print(f"{'=' * 70}\n")
 

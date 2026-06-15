@@ -212,15 +212,17 @@ class DataLogger:
             "agent_position": [],
             "concentration": [],
             "agent_state": [],
+            "battery": [],
             "custom_osl_data": [],
         }
         self.config = config
 
-    def log_step(self, sim_time, agent_pos, concentration, agent_state, custom_osl_data=None):
+    def log_step(self, sim_time, agent_pos, concentration, agent_state, battery, custom_osl_data=None):
         self.data_buffer["time"].append(sim_time)
         self.data_buffer["agent_position"].append(agent_pos)
         self.data_buffer["concentration"].append(concentration)
         self.data_buffer["agent_state"].append(agent_state)
+        self.data_buffer["battery"].append(battery)
         if custom_osl_data:
             self.data_buffer["custom_osl_data"].append(json.dumps(custom_osl_data))
 
@@ -240,6 +242,8 @@ class DataLogger:
                     f.create_dataset("agent/positions", data=np.array(data))
                 elif key == "concentration":
                     f.create_dataset("agent/concentrations", data=np.array(data))
+                elif key == "battery":
+                    f.create_dataset("agent/battery", data=np.array(data))
                 else:
                     f.create_dataset(key, data=np.array(data))
 
@@ -345,6 +349,10 @@ class Agent:
         self.radius = self.config["agent_radius"]
         self.speed = self.config["agent_speed"]
         self.measured_flow_direction = np.array([1.0, 0.0])
+        self.battery_capacity = self.config.get("battery_capacity", 250.0)
+        self.battery_base_decay = self.config.get("battery_base_decay", 1.0)
+        self.battery_wind_factor = self.config.get("battery_wind_factor", 0.5)
+        self.battery_min_decay = self.config.get("battery_min_decay", 0.1)
         self.reset()
 
     def reset(self):
@@ -365,6 +373,7 @@ class Agent:
         self.circling_step = 0
         self.prev_dist_to_detection = None
         self.skirting_side_ida = None
+        self.battery = self.battery_capacity
 
     def get_circling_target(self):
         source_pos = np.array(self.config["source_position"])
@@ -628,9 +637,9 @@ class PlumeRLWrapper(gym.Env):
         self.action_space = spaces.Discrete(4)
 
         self.observation_space = spaces.Box(
-            low=np.array([0, 0, 0, -1, -1], dtype=np.float32),
-            high=np.array([1, 1, 1, 1, 1], dtype=np.float32),
-            shape=(5,),
+            low=np.array([0, 0, 0, -1, -1, 0, 0], dtype=np.float32),
+            high=np.array([1, 1, 1, 1, 1, 1, 1], dtype=np.float32),
+            shape=(7,),
             dtype=np.float32,
         )
         self.reward_config = {
@@ -642,10 +651,16 @@ class PlumeRLWrapper(gym.Env):
             "plume_detection_bonus": 0.3,
             "upwind_bonus": 1.0,  # Bonus for moving upwind
             "goal_reward": 500.0,  # Reward for reaching goal
+            "battery_drain_penalty_factor": 0.5,
+            "battery_depleted_penalty": -200.0,
         }
 
         self.conc_max = 10.0  # Expected maximum concentration
         self.flow_max = 5.0  # Expected maximum flow magnitude
+
+        self.battery_capacity = self.config.get("battery_capacity", 250.0)
+        self.battery = self.battery_capacity
+        self.last_drain = 0.0
 
         # State tracking
         self.plume = None
@@ -711,6 +726,8 @@ class PlumeRLWrapper(gym.Env):
         self.mission_complete = False
         self.circling_step = 0
         self.prev_dist_to_detection = None
+        self.battery = self.battery_capacity
+        self.last_drain = 0.0
 
         # Stabilize plume
         for _ in range(
@@ -741,6 +758,27 @@ class PlumeRLWrapper(gym.Env):
         dist_to_source = np.linalg.norm(self.pos - source_pos)
         success_distance = self.config["agent_config"]["success_distance"]
 
+        # Calculate battery drain for this step
+        direction = dirs[action]
+        vy = self.plume.meander_generator.meandering_vy
+        flow_vec = np.array(self.config["mean_wind_velocity"]) + np.array([0.0, vy])
+        opposing_wind = -flow_vec
+        wind_resistance = np.dot(direction, opposing_wind)
+        
+        base_decay = self.config.get("battery_base_decay", 1.0)
+        wind_factor = self.config.get("battery_wind_factor", 0.5)
+        min_decay = self.config.get("battery_min_decay", 0.1)
+        
+        drain_rate = max(min_decay, base_decay + wind_factor * wind_resistance)
+        self.last_drain = drain_rate * dt
+        self.battery = max(0.0, self.battery - self.last_drain)
+
+        if self.battery <= 0:
+            terminated = True
+            truncated = False
+            reward = self.reward_config.get("battery_depleted_penalty", -200.0)
+            return self._get_obs(), reward, terminated, truncated, {"at_goal": False, "battery_depleted": True}
+
         if self.state == "searching":
             self.current_conc = calculate_concentration_gaussian_numba(self.pos, self.plume.puffs_array)
             if self.current_conc > conc_thresh:
@@ -751,6 +789,17 @@ class PlumeRLWrapper(gym.Env):
             if dist_to_source < success_distance:
                 self.state = "circling_source"
                 self.circling_step = 0
+            else:
+                # Abort check
+                speed = self.config["agent_config"]["agent_speed"]
+                dist_source_to_start = np.linalg.norm(source_pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
+                circling_dist = 16 * speed * dt
+                total_dist = dist_to_source + circling_dist + dist_source_to_start
+                est_time = total_dist / speed
+                est_battery_needed = est_time * base_decay * 1.3
+                if self.battery < est_battery_needed:
+                    self.state = "returning"
+                    self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
 
         # --- Circling source is handled programmatically ---
         if self.state == "circling_source":
@@ -761,7 +810,7 @@ class PlumeRLWrapper(gym.Env):
             self.circling_step += 1
             if self.circling_step >= total_steps:
                 self.state = "returning"
-                self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos)
+                self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
             
             # Move plume and increment time
             self.plume.update(dt, self.time)
@@ -769,6 +818,7 @@ class PlumeRLWrapper(gym.Env):
             self.current_conc = calculate_concentration_gaussian_numba(self.pos, self.plume.puffs_array)
             obs = self._get_obs()
             reward = 2.0  # constant small reward for circling
+            reward -= self.reward_config.get("battery_drain_penalty_factor", 0.5) * self.last_drain
             terminated = False
             truncated = self.time >= self.config["max_time"]
             return obs, reward, terminated, truncated, {"at_goal": False}
@@ -832,6 +882,8 @@ class PlumeRLWrapper(gym.Env):
             # Revisit penalty
             if visitas_nesta_celula > self.reward_config["revisit_threshold"]:
                 reward += self.reward_config["revisit_penalty"]
+            
+            reward -= self.reward_config.get("battery_drain_penalty_factor", 0.5) * self.last_drain
             return reward
             
         else:
@@ -876,6 +928,8 @@ class PlumeRLWrapper(gym.Env):
             if conc > threshold:
                 reward += self.reward_config["plume_detection_bonus"]
 
+            reward -= self.reward_config.get("battery_drain_penalty_factor", 0.5) * self.last_drain
+
             return reward
 
     def _get_obs(self):
@@ -900,6 +954,7 @@ class PlumeRLWrapper(gym.Env):
             conc_val = conc_normalized
 
         state_val = 1.0 if self.state == "returning" else 0.0
+        battery_level = np.clip(self.battery / self.battery_capacity, 0.0, 1.0)
 
         return np.array(
             [
@@ -909,6 +964,7 @@ class PlumeRLWrapper(gym.Env):
                 flow_x_normalized,
                 flow_y_normalized,
                 state_val,
+                battery_level
             ],
             dtype=np.float32,
         )
@@ -988,6 +1044,7 @@ class QLearningSimAgent(Agent):
         flow_x_norm = np.clip(self.measured_flow_direction[0] / 5.0, -1, 1)
         flow_y_norm = np.clip(vy / 5.0, -1, 1)
         state_val = 1.0 if self.state == "returning" else 0.0
+        battery_level = np.clip(self.battery / self.battery_capacity, 0.0, 1.0)
 
         obs = np.array(
             [
@@ -996,7 +1053,8 @@ class QLearningSimAgent(Agent):
                 conc_val,
                 flow_x_norm,
                 flow_y_norm,
-                state_val
+                state_val,
+                battery_level
             ],
             dtype=np.float32,
         )
@@ -1060,6 +1118,10 @@ class Simulator:
 
     def step(self):
         dt = self.config["dt"]
+        if self.agent.battery <= 0:
+            print(f"\n[Simulator] Agent started step with depleted battery! Mission failed.")
+            return True
+
         self.plume.update(dt, self.simulation_time)
         self.agent.measure_concentration(self.plume)
         self.agent.measure_flow(self.plume)
@@ -1080,6 +1142,19 @@ class Simulator:
                 self.agent.state = "circling_source"
                 self.agent.circling_step = 0
                 print(f"\n[Simulator] Source REACHED! Starting circling/contouring maneuver.")
+            else:
+                # Early safety abort check
+                speed = self.agent.speed
+                dist_source_to_start = np.linalg.norm(source_pos - self.agent.first_detection_pos) if self.agent.first_detection_pos is not None else 0.0
+                circling_dist = 16 * speed * dt
+                total_dist = dist_to_source + circling_dist + dist_source_to_start
+                est_time = total_dist / speed
+                base_decay = self.agent.battery_base_decay
+                est_battery_needed = est_time * base_decay * 1.3
+                if self.agent.battery < est_battery_needed:
+                    self.agent.state = "returning"
+                    self.agent.prev_dist_to_detection = np.linalg.norm(self.agent.pos - self.agent.first_detection_pos) if self.agent.first_detection_pos is not None else 0.0
+                    print(f"\n[Simulator] Low battery safety trigger! Remaining: {self.agent.battery:.1f}, Needed: {est_battery_needed:.1f}. Aborting and returning early!")
 
         elif self.agent.state == "circling_source":
             pass
@@ -1089,6 +1164,8 @@ class Simulator:
             if dist_to_detection < success_distance:
                 self.agent.mission_complete = True
                 print(f"\n[Simulator] Mission complete! Returned to detection point at {self.agent.pos}.")
+
+        old_pos = self.agent.pos.copy()
 
         if self.agent.state == "circling_source":
             target_pos = self.agent.get_circling_target()
@@ -1148,15 +1225,36 @@ class Simulator:
             target_pos, custom_data = self.agent.run_search_algorithm(dt)
             self.agent.move(target_pos, dt)
 
+        # Calculate battery drain based on actual displacement
+        displacement = self.agent.pos - old_pos
+        dist_moved = np.linalg.norm(displacement)
+        direction = displacement / dist_moved if dist_moved > 1e-6 else np.array([0.0, 0.0])
+        
+        flow_vec = self.agent.measured_flow_direction
+        opposing_wind = -flow_vec
+        wind_resistance = np.dot(direction, opposing_wind)
+        
+        base_decay = self.agent.battery_base_decay
+        wind_factor = self.agent.battery_wind_factor
+        min_decay = self.agent.battery_min_decay
+        
+        drain_rate = max(min_decay, base_decay + wind_factor * wind_resistance)
+        drain = drain_rate * dt
+        self.agent.battery = max(0.0, self.agent.battery - drain)
+
         self.logger.log_step(
             self.simulation_time,
             self.agent.pos.copy(),
             self.agent.current_concentration,
             self.agent.state,
+            self.agent.battery,
             custom_data,
         )
 
         self.simulation_time += dt
+        if self.agent.battery <= 0:
+            print(f"\n[Simulator] Battery DEPLETED at {self.agent.pos}! Mission failed at t={self.simulation_time:.2f}s.")
+            return True
         if self.agent.mission_complete:
             print(f"\nSimulation complete! Successfully returned to detection point in {self.simulation_time:.2f}s!")
             return True
@@ -1427,7 +1525,7 @@ class Simulator:
         hz = 1.0 / self.loop_time_ema if self.loop_time_ema > 0 else 0.0
         flow_vec = self.agent.measured_flow_direction
         state_str = self.agent.state.upper()
-        info_left = f"Time: {self.simulation_time:.1f}s | State: {state_str} | Conc: {self.agent.current_concentration:.2f} | Flow: ({flow_vec[0]:.1f}, {flow_vec[1]:.1f})"
+        info_left = f"Time: {self.simulation_time:.1f}s | State: {state_str} | Conc: {self.agent.current_concentration:.2f} | Bat: {self.agent.battery:.1f}/{self.agent.battery_capacity:.1f}"
         info_right = f"Agent Pos: ({self.agent.pos[0]:.1f}, {self.agent.pos[1]:.1f})"
 
         # This line is correct
@@ -1482,6 +1580,10 @@ if __name__ == "__main__":
         "emission_rate": 5,
         "initial_puff_mass": 450.0,
         "puff_decay_rate": 0.05,
+        "battery_capacity": 250.0,
+        "battery_base_decay": 1.0,
+        "battery_wind_factor": 0.5,
+        "battery_min_decay": 0.1,
         "concentration_model": "gaussian",
         "num_experiments": 10,
         "plume_stabilization_time": 1.0,
