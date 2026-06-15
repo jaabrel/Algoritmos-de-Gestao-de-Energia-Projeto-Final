@@ -1,6 +1,7 @@
 import os
 import glob
 import pickle
+import json
 import numpy as np
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -53,10 +54,15 @@ class DashboardApp:
         # --- Criar os frames de cada página ---
         self.tab_metricas = ttk.Frame(self.notebook)
         self.tab_mapa = ttk.Frame(self.notebook)
+        self.tab_config = ttk.Frame(self.notebook)
 
         # --- Adicionar as páginas ao Notebook ---
         self.notebook.add(self.tab_metricas, text="Métricas de Treino")
         self.notebook.add(self.tab_mapa, text="Mapa de Rotas")
+        self.notebook.add(self.tab_config, text="Configurações (JSON)")
+        
+        self.variaveis_form = {}
+        self.construir_aba_configuracoes()
 
         # --- Controlos dos Gráficos ----
         self.canvas_metricas = None
@@ -142,7 +148,92 @@ class DashboardApp:
         self.lbl_stats.config(text=texto_stats)
 
         self.desenhar_graficos(data)
+    
 
+    def construir_aba_configuracoes(self):
+        """Constrói a interface para editar o ficheiro config.json"""
+        config_path = "config.json"
+        
+        if not os.path.exists(config_path):
+            ttk.Label(self.tab_config, text="O ficheiro config.json ainda não existe.\nCorre o main.py pelo menos uma vez para o gerar.", font=("Arial", 12)).pack(pady=20)
+            return
+
+        with open(config_path, "r") as f:
+            self.config_atual = json.load(f)
+
+        # Criar um layout de duas colunas (Esquerda: Física, Direita: Agente)
+        frame_principal = ttk.Frame(self.tab_config, padding="20")
+        frame_principal.pack(fill=tk.BOTH, expand=True)
+        
+        col_esq = ttk.LabelFrame(frame_principal, text="Física da Pluma", padding="10")
+        col_esq.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        
+        col_dir = ttk.LabelFrame(frame_principal, text="Agente e Ambiente", padding="10")
+        col_dir.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5)
+
+        # Função auxiliar para criar os campos de input
+        def criar_campo(parent, label, key_pai, key_filho=None, tipo=float):
+            frame = ttk.Frame(parent)
+            frame.pack(fill=tk.X, pady=5)
+            ttk.Label(frame, text=label, width=25).pack(side=tk.LEFT)
+            
+            # Vai buscar o valor atual
+            if key_filho:
+                val = self.config_atual.get(key_pai, {}).get(key_filho, 0)
+            else:
+                val = self.config_atual.get(key_pai, 0)
+                
+            # Se for uma lista/tupla (como o vento), lidamos com o primeiro valor (X)
+            if isinstance(val, list) and key_pai == "mean_wind_velocity":
+                val = val[0]
+                
+            var_tk = tk.StringVar(value=str(val))
+            ttk.Entry(frame, textvariable=var_tk, width=15).pack(side=tk.RIGHT)
+            
+            # Guarda a referência para podermos salvar depois
+            self.variaveis_form[(key_pai, key_filho, tipo)] = var_tk
+
+        # --- CAMPOS DA FÍSICA (Coluna Esquerda) ---
+        criar_campo(col_esq, "Taxa de Emissão (Puffs/s):", "emission_rate", tipo=int)
+        criar_campo(col_esq, "Massa Inicial (Tinta):", "initial_puff_mass")
+        criar_campo(col_esq, "Velocidade do Vento (X):", "mean_wind_velocity")
+        criar_campo(col_esq, "Amplitude da Onda (v_var):", "sinusoid_meander_config", "v_var")
+        criar_campo(col_esq, "Comprimento da Onda (L):", "sinusoid_meander_config", "integral_length_scale_L")
+
+        # --- CAMPOS DO AGENTE (Coluna Direita) ---
+        criar_campo(col_dir, "Duração do Episódio (Max Time):", "max_time")
+        criar_campo(col_dir, "Velocidade do Agente:", "agent_config", "agent_speed")
+        criar_campo(col_dir, "Raio do Agente:", "agent_config", "agent_radius")
+        
+        # Botão de Salvar
+        btn_salvar = ttk.Button(self.tab_config, text="💾 Guardar Configurações", command=self.salvar_configuracoes)
+        btn_salvar.pack(side=tk.BOTTOM, pady=20)
+
+    def salvar_configuracoes(self):
+        """Pega nos valores escritos nos campos e atualiza o config.json"""
+        for (key_pai, key_filho, tipo), var_tk in self.variaveis_form.items():
+            try:
+                # Converte o texto da caixa para número (int ou float)
+                valor_novo = tipo(var_tk.get())
+                
+                # Tratamento especial para o vento (que é uma lista de 2 valores)
+                if key_pai == "mean_wind_velocity":
+                    self.config_atual[key_pai] = [valor_novo, 0.0]
+                elif key_filho:
+                    self.config_atual[key_pai][key_filho] = valor_novo
+                else:
+                    self.config_atual[key_pai] = valor_novo
+                    
+            except ValueError:
+                messagebox.showerror("Erro de Valor", f"O valor para '{key_pai}' é inválido. Usa apenas números.")
+                return
+
+        # Guarda no ficheiro\\
+        with open("config.json", "w") as f:
+            json.dump(self.config_atual, f, indent=4)
+            
+        messagebox.showinfo("Sucesso", "Configurações guardadas com sucesso no config.json!\nO teu próximo treino no main.py já vai usar estas regras.")
+    
     def desenhar_graficos(self, data):
         stats = data.get("stats", {})
         recompensas = stats["rewards"]
