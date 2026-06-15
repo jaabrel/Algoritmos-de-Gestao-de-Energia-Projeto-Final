@@ -219,4 +219,4 @@ __marimo__/
 .idea/
 # Streamlit
 .streamlit/secrets.toml
-
+.vs/
