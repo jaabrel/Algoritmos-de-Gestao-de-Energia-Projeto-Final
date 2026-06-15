@@ -646,11 +646,11 @@ class PlumeRLWrapper(gym.Env):
             "step_penalty": -0.05,
             "concentration_improvement": 1.0,
             "concentration_decrease": -0.05,
-            "revisit_threshold": 1.0,  #
-            "revisit_penalty": -0.2,  # Mild penalty for revisiting
+            "revisit_threshold": 1.0,
+            "revisit_penalty": -0.2,
             "plume_detection_bonus": 0.3,
-            "upwind_bonus": 1.0,  # Bonus for moving upwind
-            "goal_reward": 500.0,  # Reward for reaching goal
+            "upwind_bonus": 1.0,
+            "goal_reward": 500.0,
             "battery_drain_penalty_factor": 0.5,
             "battery_depleted_penalty": -200.0,
         }
@@ -719,6 +719,9 @@ class PlumeRLWrapper(gym.Env):
         self.steps_in_current_cell = 0
         self.prev_conc = 0.0
         self.current_conc = 0.0
+        self.first_detection_pos = None
+        self.has_moved_away = False
+        self.path_length = 0.0
 
         # Mission state machine properties
         self.state = "searching"
@@ -1564,13 +1567,15 @@ class Simulator:
 
 if __name__ == "__main__":
     import glob
+    import json
+    import os
 
-    CONFIG = {
+    DEFAULT_CONFIG = {
         "dt": 0.1,
         "max_time": 200.0,
         "save_path": "experiments",
         "experiment_name": "bio_inspired_test",
-        "visualize": True,
+        "visualize": False,
         "real_time_pacing": False,
         "viz_width": 1200,
         "viz_height": 600,
@@ -1629,6 +1634,15 @@ if __name__ == "__main__":
             "confirmation_steps": 3,
         },
     }
+
+    config_file_path = "config.json"
+
+    if not os.path.exists(config_file_path):
+        with open(config_file_path, "w") as f:
+            json.dump(DEFAULT_CONFIG, f, indent=4)
+
+    with open(config_file_path, "r") as f:
+        CONFIG = json.load(f)
 
     print("=" * 40)
     print(" OPÇÕES DE TREINO:")

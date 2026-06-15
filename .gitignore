@@ -192,6 +192,7 @@ cython_debug/
 # Visual Studio Code
 .vscode/
 
+.idea/
 # Streamlit
 .streamlit/secrets.toml
 
