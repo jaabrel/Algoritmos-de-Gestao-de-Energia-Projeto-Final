@@ -54,7 +54,7 @@ class QLearningAgent:
         """
         Convert continuous state to discrete state key for Q-table indexing
 
-        State format: [norm_x, norm_y, conc, flow_x, flow_y]
+        State format: [norm_x, norm_y, conc, flow_x, flow_y, mission_state]
         All values should be normalized to [0, 1] range (or close to it)
 
         """
@@ -80,7 +80,19 @@ class QLearningAgent:
         angle = np.arctan2(fy, fx)
         wind_dir = int(np.round(angle / (np.pi / 2))) % 4
 
-        return (x_b, y_b, c_b, wind_dir)
+        # Dynamic state binning
+        # For backward compatibility: if a Q-table is loaded and its keys are 4-tuples,
+        # we strip the mission_state_bin and return a 4-tuple.
+        if self.q_table:
+            first_key = next(iter(self.q_table.keys()))
+            if len(first_key) == 4:
+                return (x_b, y_b, c_b, wind_dir)
+
+        mission_state_bin = 0
+        if len(state) > 5:
+            mission_state_bin = int(np.round(state[5]))
+
+        return (x_b, y_b, c_b, wind_dir, mission_state_bin)
 
     def choose_action(self, state, greedy: bool = False) -> int:
 
@@ -93,6 +105,9 @@ class QLearningAgent:
             return self.env.action_space.sample()
         else:
             q_values = self.q_table.get(key, np.zeros(self.env.action_space.n))
+            if np.all(q_values == 0):
+                # Unvisited/untrained state fallback: choose random action to prevent getting stuck
+                return random.randint(0, self.env.action_space.n - 1)
             # Exploit: best known action
             return int(np.argmax(q_values))
 
