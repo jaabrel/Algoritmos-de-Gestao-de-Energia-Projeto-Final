@@ -195,4 +195,4 @@ cython_debug/
 .idea/
 # Streamlit
 .streamlit/secrets.toml
-
+.vs/
