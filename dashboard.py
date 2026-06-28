@@ -188,17 +188,54 @@ class DashboardApp:
                 val = val[0]
                 
             var_tk = tk.StringVar(value=str(val))
-            ttk.Entry(frame, textvariable=var_tk, width=15).pack(side=tk.RIGHT)
+            entry = ttk.Entry(frame, textvariable=var_tk, width=15)
+            entry.pack(side=tk.RIGHT)
             
             # Guarda a referência para podermos salvar depois
             self.variaveis_form[(key_pai, key_filho, tipo)] = var_tk
+            return entry
 
         # --- CAMPOS DA FÍSICA (Coluna Esquerda) ---
         criar_campo(col_esq, "Taxa de Emissão (Puffs/s):", "emission_rate", tipo=int)
         criar_campo(col_esq, "Massa Inicial (Tinta):", "initial_puff_mass")
         criar_campo(col_esq, "Velocidade do Vento (X):", "mean_wind_velocity")
-        criar_campo(col_esq, "Amplitude da Onda (v_var):", "sinusoid_meander_config", "v_var")
-        criar_campo(col_esq, "Comprimento da Onda (L):", "sinusoid_meander_config", "integral_length_scale_L")
+        criar_campo(col_esq, "Taxa de Expansão (Volume):", "puff_expansion_rate")
+        criar_campo(col_esq, "Taxa de Decaimento (Decaída):", "puff_decay_rate")
+        
+        # Modelo de Pluma
+        frame_tipo = ttk.Frame(col_esq)
+        frame_tipo.pack(fill=tk.X, pady=5)
+        ttk.Label(frame_tipo, text="Modelo de Pluma:", width=25).pack(side=tk.LEFT)
+        
+        val_atual = self.config_atual.get("meander_model", "ou")
+        if val_atual.lower() == "sum_of_sinusoids":
+            opcao_inicial = "Sinusoidal"
+        else:
+            opcao_inicial = "Linear"
+            
+        self.var_tipo_pluma = tk.StringVar(value=opcao_inicial)
+        self.combo_tipo_pluma = ttk.Combobox(
+            frame_tipo, 
+            textvariable=self.var_tipo_pluma, 
+            values=["Sinusoidal", "Linear"], 
+            state="readonly", 
+            width=12
+        )
+        self.combo_tipo_pluma.pack(side=tk.RIGHT)
+
+        self.entry_amplitude = criar_campo(col_esq, "Amplitude da Onda (v_var):", "sinusoid_meander_config", "v_var")
+        self.entry_comprimento = criar_campo(col_esq, "Comprimento da Onda (L):", "sinusoid_meander_config", "integral_length_scale_L")
+
+        def atualizar_estado_campos(event=None):
+            if self.var_tipo_pluma.get() == "Sinusoidal":
+                self.entry_amplitude.config(state="normal")
+                self.entry_comprimento.config(state="normal")
+            else:
+                self.entry_amplitude.config(state="disabled")
+                self.entry_comprimento.config(state="disabled")
+
+        self.combo_tipo_pluma.bind("<<ComboboxSelected>>", atualizar_estado_campos)
+        atualizar_estado_campos()
 
         # --- CAMPOS DO AGENTE (Coluna Direita) ---
         criar_campo(col_dir, "Duração do Episódio (Max Time):", "max_time")
@@ -228,7 +265,14 @@ class DashboardApp:
                 messagebox.showerror("Erro de Valor", f"O valor para '{key_pai}' é inválido. Usa apenas números.")
                 return
 
-        # Guarda no ficheiro\\
+        # Atualiza o modelo de pluma com base na seleção do dropdown
+        tipo_pluma = self.var_tipo_pluma.get()
+        if tipo_pluma == "Sinusoidal":
+            self.config_atual["meander_model"] = "sum_of_sinusoids"
+        else:
+            self.config_atual["meander_model"] = "linear"
+
+        # Guarda no ficheiro
         with open("config.json", "w") as f:
             json.dump(self.config_atual, f, indent=4)
             

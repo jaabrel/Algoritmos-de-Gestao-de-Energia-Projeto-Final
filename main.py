@@ -18,7 +18,7 @@ from QLearning import QLearningAgent as RLQLearningAgent
 
 @jit(nopython=True)
 def update_puffs_numba(
-    puffs_array, dt, wind_velocity, meandering_vy, turbulence_intensity, puff_decay_rate, min_mass
+    puffs_array, dt, wind_velocity, meandering_vy, turbulence_intensity, puff_decay_rate, puff_expansion_rate, min_mass
 ):
     """
     Updates the state of all puffs. This function is JIT-compiled by Numba for performance.
@@ -34,13 +34,13 @@ def update_puffs_numba(
         puffs_array[i, 1] += wind_velocity[1] * dt
         puffs_array[i, 1] += meandering_vy * dt
 
-        # Controlled turbulence: moderate horizontal, tight vertical for excellent shape definition
-        turbulence_x = np.random.randn() * (turbulence_intensity * 1.0) * sqrt_dt
-        turbulence_y = np.random.randn() * (turbulence_intensity * 0.3) * sqrt_dt
+        # Isotropic turbulence for a wider plume coverage
+        turbulence_x = np.random.randn() * turbulence_intensity * sqrt_dt
+        turbulence_y = np.random.randn() * turbulence_intensity * sqrt_dt
         puffs_array[i, 0] += turbulence_x
         puffs_array[i, 1] += turbulence_y
 
-        puffs_array[i, 2] = 0.1 * np.sqrt(puffs_array[i, 4])
+        puffs_array[i, 2] = puff_expansion_rate * np.sqrt(puffs_array[i, 4])
         puffs_array[i, 3] *= 1.0 - puff_decay_rate * dt
         puffs_array[i, 4] += dt
 
@@ -115,6 +115,17 @@ class MeanderModel:
 
     def update(self, dt, current_time):
         raise NotImplementedError
+
+
+class Linear_MeanderModel(MeanderModel):
+    """No meandering, resulting in a straight (linear) plume."""
+
+    def __init__(self, main_config, model_config):
+        super().__init__(main_config, model_config)
+        self.meandering_vy = 0.0
+
+    def update(self, dt, current_time):
+        return 0.0
 
 
 class OU_MeanderModel(MeanderModel):
@@ -273,11 +284,14 @@ class FilamentPlume:
         self.puffs_array = np.zeros((self.max_puffs, 5), dtype=np.float32)
         self.time_since_last_puff = 0.0
 
-        model_name = self.config.get("meander_model", "ou")
+        model_name = self.config.get("meander_model", "ou").lower()
         if model_name == "sum_of_sinusoids":
             print("Using Sum of Sinusoids meander model.")
             model_config = self.config.get("sinusoid_meander_config", {})
             self.meander_generator = Sinusoid_MeanderModel(self.config, model_config)
+        elif model_name == "linear":
+            print("Using Linear (no meander) plume model.")
+            self.meander_generator = Linear_MeanderModel(self.config, {})
         else:
             print("Using Ornstein-Uhlenbeck (OU) meander model.")
             model_config = self.config.get("ou_meander_config", {})
@@ -332,6 +346,7 @@ class FilamentPlume:
                 meander_val,
                 self.config["turbulence_intensity"],
                 self.config["puff_decay_rate"],
+                self.config.get("puff_expansion_rate", 0.2),
                 min_mass,
             )
             # Atualizar inatividade no próprio array (sem realocação de memória)
@@ -349,7 +364,7 @@ class Agent:
         self.radius = self.config["agent_radius"]
         self.speed = self.config["agent_speed"]
         self.measured_flow_direction = np.array([1.0, 0.0])
-        self.battery_capacity = self.config.get("battery_capacity", 250.0)
+        self.battery_capacity = self.config.get("battery_capacity", 100.0)
         self.battery_base_decay = self.config.get("battery_base_decay", 1.0)
         self.battery_wind_factor = self.config.get("battery_wind_factor", 0.5)
         self.battery_min_decay = self.config.get("battery_min_decay", 0.1)
@@ -761,7 +776,7 @@ class PlumeRLWrapper(gym.Env):
         dist_to_source = np.linalg.norm(self.pos - source_pos)
         success_distance = self.config["agent_config"]["success_distance"]
 
-        # Calculate battery drain for this step
+        # Definição do decay-rate da bateria dependendendo do vento
         direction = dirs[action]
         vy = self.plume.meander_generator.meandering_vy
         flow_vec = np.array(self.config["mean_wind_velocity"]) + np.array([0.0, vy])
@@ -828,6 +843,12 @@ class PlumeRLWrapper(gym.Env):
 
         # --- Normal step movement (for searching, following, returning) ---
         target = self.pos + dirs[action] * self.config["agent_config"]["agent_speed"] * dt
+        
+        hit_boundary = False
+        if (target[0] < 0.0 or target[0] > self.config["world_width"] or
+            target[1] < 0.0 or target[1] > self.config["world_height"]):
+            hit_boundary = True
+
         self.pos[0] = np.clip(target[0], 0, self.config["world_width"])
         self.pos[1] = np.clip(target[1], 0, self.config["world_height"])
 
@@ -858,16 +879,16 @@ class PlumeRLWrapper(gym.Env):
             at_goal = dist_to_detection < success_distance
             terminated = at_goal
             truncated = self.time >= self.config["max_time"]
-            reward = self._calculate_reward(self.current_conc, self.prev_conc, visitas_nesta_celula, at_goal)
+            reward = self._calculate_reward(self.current_conc, self.prev_conc, visitas_nesta_celula, at_goal, hit_boundary)
         else:
             at_goal = dist_to_source < success_distance
             terminated = False  # Simulation does NOT terminate when reaching source
             truncated = self.time >= self.config["max_time"]
-            reward = self._calculate_reward(self.current_conc, self.prev_conc, visitas_nesta_celula, False)
+            reward = self._calculate_reward(self.current_conc, self.prev_conc, visitas_nesta_celula, False, hit_boundary)
 
         return self._get_obs(), reward, terminated, truncated, {"at_goal": at_goal}
 
-    def _calculate_reward(self, conc, prev_conc, visitas_nesta_celula, at_goal):
+    def _calculate_reward(self, conc, prev_conc, visitas_nesta_celula, at_goal, hit_boundary):
         if self.state == "returning":
             if at_goal:
                 return 500.0  # Terminal reward for returning
@@ -882,10 +903,7 @@ class PlumeRLWrapper(gym.Env):
             # Reward for moving closer to first_detection_pos
             reward += -delta_dist * 10.0
             
-            # Revisit penalty
-            if visitas_nesta_celula > self.reward_config["revisit_threshold"]:
-                reward += self.reward_config["revisit_penalty"]
-            
+            # No revisit penalty when returning to first detection point (as requested by user)
             reward -= self.reward_config.get("battery_drain_penalty_factor", 0.5) * self.last_drain
             return reward
             
@@ -916,12 +934,31 @@ class PlumeRLWrapper(gym.Env):
                         if upwind_progress > 0:
                             reward += self.reward_config["upwind_bonus"] * upwind_progress * 1.5
             else:
-                # Searching: basic concentration improvement reward
+                # Searching: basic concentration improvement reward + strong upwind progress reward
                 conc_diff = conc - prev_conc
                 if conc_diff > 0:
                     reward += self.reward_config["concentration_improvement"] * min(conc_diff, 1.0)
                 elif conc_diff < 0 and conc > 0:
                     reward += self.reward_config["concentration_decrease"]
+
+                # Move against the wind to find the plume (Upwind progress reward/penalty during searching)
+                mean_wind = np.array(self.config["mean_wind_velocity"])
+                if np.linalg.norm(mean_wind) > 1e-6:
+                    upwind_dir = -mean_wind / np.linalg.norm(mean_wind)
+                    movement = self.pos - self.prev_pos
+                    movement_norm = np.linalg.norm(movement)
+                    if movement_norm > 1e-6:
+                        upwind_progress = np.dot(movement / movement_norm, upwind_dir)
+                        # Recompensa linear (positiva para upwind, negativa para downwind)
+                        reward += self.reward_config["upwind_bonus"] * upwind_progress * 3.0
+
+                # Penalização por bater na parede (out-of-bounds) durante a busca
+                if hit_boundary:
+                    reward += -2.0
+
+                # Penalização por inatividade (não sair da mesma célula) durante a busca
+                if self.steps_in_current_cell > 8:
+                    reward += -0.5 * (self.steps_in_current_cell - 8)
 
             if visitas_nesta_celula > self.reward_config["revisit_threshold"]:
                 reward += self.reward_config["revisit_penalty"]
@@ -998,7 +1035,64 @@ class QLearningSimAgent(Agent):
         except:
             print(f"\n[-] Model '{chosen_model}' not found")
 
+    def reset(self):
+        super().reset()
+        self.search_zig_zag_dir = 1 if np.random.rand() > 0.5 else -1
+        self.search_steps_in_dir = 0.0
+
     def run_search_algorithm(self, dt):
+        if self.state == "searching":
+            # Deterministic casting/zig-zag behavior against the wind
+            agent_speed = self.config.get("agent_config", {}).get("agent_speed", 3.0)
+            cast_angle_deg = self.config.get("agent_config", {}).get("cast_angle", 60.0)
+            cast_length = self.config.get("agent_config", {}).get("cast_length", 6.0)
+            
+            if not hasattr(self, "search_zig_zag_dir"):
+                self.search_zig_zag_dir = 1 if np.random.rand() > 0.5 else -1
+                self.search_steps_in_dir = 0.0
+                
+            flow_norm = np.linalg.norm(self.measured_flow_direction)
+            if flow_norm > 1e-6:
+                upwind_dir = -self.measured_flow_direction / flow_norm
+            else:
+                upwind_dir = np.array([-1.0, 0.0])  # default to Left (against typical wind)
+                
+            # Rotate upwind direction by cast_angle in the current direction sign
+            angle_rad = np.deg2rad(cast_angle_deg * self.search_zig_zag_dir)
+            rot_matrix = np.array([
+                [np.cos(angle_rad), -np.sin(angle_rad)],
+                [np.sin(angle_rad), np.cos(angle_rad)]
+            ])
+            move_dir = rot_matrix @ upwind_dir
+            
+            # Step distance
+            step_dist = agent_speed * dt
+            target_pos = self.pos + move_dir * step_dist
+            
+            # Update distance in current direction
+            self.search_steps_in_dir += step_dist
+            
+            # Check boundaries (top and bottom with 2.0 margin)
+            world_h = self.config["world_height"]
+            margin = 2.0
+            hit_wall = (target_pos[1] < margin and self.search_zig_zag_dir == -1) or \
+                       (target_pos[1] > world_h - margin and self.search_zig_zag_dir == 1)
+                       
+            if self.search_steps_in_dir >= cast_length or hit_wall:
+                self.search_zig_zag_dir *= -1
+                self.search_steps_in_dir = 0.0
+                
+                # Recompute target_pos in the new direction
+                angle_rad = np.deg2rad(cast_angle_deg * self.search_zig_zag_dir)
+                rot_matrix = np.array([
+                    [np.cos(angle_rad), -np.sin(angle_rad)],
+                    [np.sin(angle_rad), np.cos(angle_rad)]
+                ])
+                move_dir = rot_matrix @ upwind_dir
+                target_pos = self.pos + move_dir * step_dist
+                
+            return target_pos, {"action": f"searching_zigzag_{self.search_zig_zag_dir}"}
+
         # Check if the loaded model is a 4-tuple model (which does not support RL returning)
         is_4tuple = False
         if hasattr(self, 'q_agent') and self.q_agent.q_table:
@@ -1575,7 +1669,7 @@ if __name__ == "__main__":
         "max_time": 200.0,
         "save_path": "experiments",
         "experiment_name": "bio_inspired_test",
-        "visualize": False,
+        "visualize": True,
         "real_time_pacing": False,
         "viz_width": 1200,
         "viz_height": 600,
@@ -1584,10 +1678,11 @@ if __name__ == "__main__":
         "source_position": (20.0, 25.0),
         "emission_rate": 5,
         "initial_puff_mass": 450.0,
-        "puff_decay_rate": 0.05,
-        "battery_capacity": 250.0,
-        "battery_base_decay": 1.0,
-        "battery_wind_factor": 0.5,
+        "puff_decay_rate": 0.02,
+        "puff_expansion_rate": 0.35,
+        "battery_capacity": 100.0,
+        "battery_base_decay": 0.5,
+        "battery_wind_factor": 1.5,
         "battery_min_decay": 0.1,
         "concentration_model": "gaussian",
         "num_experiments": 10,
@@ -1595,10 +1690,10 @@ if __name__ == "__main__":
         "agent_start_region_center": (60.0, 25.0),
         "agent_start_region_radius": 2.0,
         # --- MEANDER MODEL CONFIGURATION ---
-        "meander_model": "sum_of_sinusoids",
+        "meander_model": "OU",
         "ou_meander_config": {
-            "intensity": 0.08,  # Well-controlled meander intensity
-            "timescale": 0.1,
+            "intensity": 0.4,
+            "timescale": 0.15,
         },
         "sinusoid_meander_config": {
             "num_harmonics": 10,
@@ -1615,10 +1710,10 @@ if __name__ == "__main__":
         # 'drift_correction_timescale': 45.0
         # },
         # --- TURBULENCE INTENSITY ---
-        "turbulence_intensity": 0.25,  # Moderated base intensity for tight, highly structured plume
+        "turbulence_intensity": 0.15,
         # 'turbulence_intensity': 0.7,
         # --- MEAN WIND VELOCITY ---
-        "mean_wind_velocity": (0.2, 0),
+        "mean_wind_velocity": (1.5, 0),
         "agent_class": "QLearningAgent",
         "agent_config": {
             "agent_radius": 0.5,

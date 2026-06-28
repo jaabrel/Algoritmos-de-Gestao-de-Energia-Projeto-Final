@@ -222,6 +222,15 @@ class QLearningAgent:
             if self.epsilon > self.min_epsilon:
                 self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
             
+            # Early stopping check if success rate is solid
+            if ep_relativo >= 100:
+                w_check = min(100, len(self.success_history))
+                avg_success_check = np.mean(self.success_history[-w_check:])
+                if avg_success_check >= 0.80:
+                    logger.info(f"Treino convergido com sucesso de {avg_success_check*100:.1f}% no ep {ep_absoluto}. Paragem antecipada.")
+                    print(f"\n[Early Stopping] Convergência atingida com {avg_success_check*100:.1f}% de sucesso no episódio {ep_absoluto}!")
+                    break
+
             if ep_absoluto % 50 == 0 or ep_relativo > num_episodes - 10:
                 self.saved_paths[ep_absoluto] = current_path
 
@@ -233,11 +242,11 @@ class QLearningAgent:
                 avg_success = np.mean(self.success_history[-w:]) * 100
 
                 print(
-                    f"  Ep {ep_absoluto:>5} (+{ep_relativo} | "
+                    f"  Ep {ep_absoluto:>5} (+{ep_relativo}) | "
                     f"Avg Reward: {avg_reward:>7.2f} | "
                     f"Avg Length: {avg_length:>6.1f} | "
                     f"Success: {avg_success:>5.1f}% | "
-                    f"ε: {self.epsilon:.4f} | "
+                    f"Eps: {self.epsilon:.4f} | "
                     f"Q-States: {len(self.q_table):>5}"
                 )
 

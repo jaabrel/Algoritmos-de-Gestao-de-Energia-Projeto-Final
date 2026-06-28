@@ -3,7 +3,7 @@
     "max_time": 200.0,
     "save_path": "experiments",
     "experiment_name": "bio_inspired_test",
-    "visualize": false,
+    "visualize": true,
     "real_time_pacing": false,
     "viz_width": 1200,
     "viz_height": 600,
@@ -14,8 +14,9 @@
         25.0
     ],
     "emission_rate": 10,
-    "initial_puff_mass": 300.0,
-    "puff_decay_rate": 0.05,
+    "initial_puff_mass": 400.0,
+    "puff_decay_rate": 0.02,
+    "puff_expansion_rate": 0.35,
     "concentration_model": "gaussian",
     "num_experiments": 10,
     "plume_stabilization_time": 1.0,
@@ -24,26 +25,30 @@
         25.0
     ],
     "agent_start_region_radius": 2.0,
-    "meander_model": "OU",
+    "meander_model": "linear",
     "ou_meander_config": {
-        "intensity": 0.1,
-        "timescale": 0.1
+        "intensity": 0.4,
+        "timescale": 0.15
     },
     "sinusoid_meander_config": {
         "num_harmonics": 10,
-        "v_var": 0.8,
-        "integral_length_scale_L": 20.0,
+        "v_var": 1.0,
+        "integral_length_scale_L": 40.0,
         "drift_correction_timescale": 10
     },
-    "turbulence_intensity": 0.1,
+    "turbulence_intensity": 0.15,
     "mean_wind_velocity": [
-        1,
-        0
+        1.5,
+        0.0
     ],
-    "agent_class": "QLearingAgent",
+    "agent_class": "QLearningAgent",
+    "battery_capacity": 100.0,
+    "battery_base_decay": 0.5,
+    "battery_wind_factor": 1.5,
+    "battery_min_decay": 0.1,
     "agent_config": {
         "agent_radius": 0.5,
-        "agent_speed": 3.0,
+        "agent_speed": 2.0,
         "success_distance": 2.0,
         "agent_concentration_threshold": 1.0,
         "surge_length": 4.0,
