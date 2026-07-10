@@ -16,7 +16,7 @@
     "emission_rate": 10,
     "initial_puff_mass": 400.0,
     "puff_decay_rate": 0.02,
-    "puff_expansion_rate": 0.35,
+    "puff_expansion_rate": 0.25,
     "concentration_model": "gaussian",
     "num_experiments": 10,
     "plume_stabilization_time": 1.0,
@@ -38,7 +38,7 @@
     },
     "turbulence_intensity": 0.15,
     "mean_wind_velocity": [
-        1.5,
+        0.4,
         0.0
     ],
     "agent_class": "QLearningAgent",
@@ -51,6 +51,7 @@
         "agent_speed": 2.0,
         "success_distance": 2.0,
         "agent_concentration_threshold": 1.0,
+        "dist_to_detection": 5.0,
         "surge_length": 4.0,
         "cast_length": 6.0,
         "cast_angle": 60.0,
