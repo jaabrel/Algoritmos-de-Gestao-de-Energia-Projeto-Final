@@ -118,7 +118,6 @@ class MeanderModel:
 
 
 class Linear_MeanderModel(MeanderModel):
-    """No meandering, resulting in a straight (linear) plume."""
 
     def __init__(self, main_config, model_config):
         super().__init__(main_config, model_config)
@@ -129,7 +128,7 @@ class Linear_MeanderModel(MeanderModel):
 
 
 class OU_MeanderModel(MeanderModel):
-    """Ornstein-Uhlenbeck process for meandering."""
+
 
     def __init__(self, main_config, model_config):
         super().__init__(main_config, model_config)
@@ -148,10 +147,7 @@ class OU_MeanderModel(MeanderModel):
 
 
 class Sinusoid_MeanderModel(MeanderModel):
-    """
-    A physically-grounded Sum of Sinusoids model that includes a
-    selectable (optional) mean-reverting force to prevent long-term plume drift.
-    """
+ 
 
     def __init__(self, main_config, model_config):
         super().__init__(main_config, model_config)
@@ -267,7 +263,6 @@ class DataLogger:
 
 
 class FilamentPlume:
-    """Manages the physics of the odor environment using a selected meander model."""
 
     def __init__(self, config):
         self.config = config
@@ -335,9 +330,7 @@ class FilamentPlume:
             self.time_since_last_puff = 0.0
 
         if self.puffs_array.shape[0] > 0:
-            # For the sum_of_sinusoids model, we pass 0.0 to update_puffs_numba so that
-            # existing puffs do not experience the global vertical meander velocity.
-            # This preserves the sinusoidal shape in space.
+ 
             meander_val = 0.0 if self.config.get("meander_model", "ou") == "sum_of_sinusoids" else meandering_vy
             self.puffs_array = update_puffs_numba(
                 self.puffs_array,
@@ -357,7 +350,7 @@ class FilamentPlume:
 
 
 class Agent:
-    """Base class for a searching agent."""
+
 
     def __init__(self, config):
         self.config = config
@@ -1102,7 +1095,7 @@ class QLearningSimAgent(Agent):
 
         if self.state == "returning" and is_4tuple:
             dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos)
-            if dist_to_detection < 10.0:
+            if dist_to_detection < 0.1:
                 # Close to return point: ignore skirting and go straight to it!
                 goal_vec = self.first_detection_pos - self.pos
                 goal_norm = np.linalg.norm(goal_vec)
@@ -1291,7 +1284,8 @@ class Simulator:
             self.agent.move(target_pos, dt)
         elif self.agent.state == "returning":
             dist_to_detection = np.linalg.norm(self.agent.pos - self.agent.first_detection_pos)
-            if dist_to_detection < 10.0:
+            dist_to_detection_thresh = self.config.get("agent_config", {}).get("dist_to_detection", 5.0)
+            if dist_to_detection < dist_to_detection_thresh:
                 # Close to return point: ignore skirting and go straight to it!
                 goal_vec = self.agent.first_detection_pos - self.agent.pos
                 goal_norm = np.linalg.norm(goal_vec)
@@ -1679,7 +1673,7 @@ if __name__ == "__main__":
         "emission_rate": 5,
         "initial_puff_mass": 450.0,
         "puff_decay_rate": 0.02,
-        "puff_expansion_rate": 0.35,
+        "puff_expansion_rate": 0.20,
         "battery_capacity": 100.0,
         "battery_base_decay": 0.5,
         "battery_wind_factor": 1.5,

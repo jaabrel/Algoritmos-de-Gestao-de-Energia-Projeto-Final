@@ -201,6 +201,7 @@ class DashboardApp:
         criar_campo(col_esq, "Velocidade do Vento (X):", "mean_wind_velocity")
         criar_campo(col_esq, "Taxa de Expansão (Volume):", "puff_expansion_rate")
         criar_campo(col_esq, "Taxa de Decaimento (Decaída):", "puff_decay_rate")
+        criar_campo(col_esq, "Intensidade Turbulência:", "turbulence_intensity")
         
         # Modelo de Pluma
         frame_tipo = ttk.Frame(col_esq)
@@ -238,16 +239,22 @@ class DashboardApp:
         atualizar_estado_campos()
 
         # --- CAMPOS DO AGENTE (Coluna Direita) ---
-        criar_campo(col_dir, "Duração do Episódio (Max Time):", "max_time")
+        criar_campo(col_dir, "Duração do Episódio:", "max_time")
         criar_campo(col_dir, "Velocidade do Agente:", "agent_config", "agent_speed")
         criar_campo(col_dir, "Raio do Agente:", "agent_config", "agent_radius")
+        criar_campo(col_dir, "Capacidade da Bateria:", "battery_capacity")
+        criar_campo(col_dir, "Decaimento Base Bateria:", "battery_base_decay")
+        criar_campo(col_dir, "Fator Vento Bateria:", "battery_wind_factor")
+        criar_campo(col_dir, "Limiar Deteção Odor:", "agent_config", "agent_concentration_threshold")
+        criar_campo(col_dir, "Distância de Sucesso:", "agent_config", "success_distance")
+        criar_campo(col_dir, "Dist. Direta Regresso:", "agent_config", "dist_to_detection")
         
         # Botão de Salvar
         btn_salvar = ttk.Button(self.tab_config, text="💾 Guardar Configurações", command=self.salvar_configuracoes)
         btn_salvar.pack(side=tk.BOTTOM, pady=20)
 
     def salvar_configuracoes(self):
-        """Pega nos valores escritos nos campos e atualiza o config.json"""
+        
         for (key_pai, key_filho, tipo), var_tk in self.variaveis_form.items():
             try:
                 # Converte o texto da caixa para número (int ou float)
