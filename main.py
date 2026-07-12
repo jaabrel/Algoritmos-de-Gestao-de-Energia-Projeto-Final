@@ -101,6 +101,27 @@ def calculate_concentration_gaussian_numba(agent_pos, puffs_array):
     return total_concentration
 
 
+def plume_exists_at_x(x, plume, config):
+    if plume is None:
+        return False
+    world_h = config["world_height"]
+    agent_config = config.get("agent_config", {})
+    conc_thresh = agent_config.get("agent_concentration_threshold", 1.0)
+    agent_radius = agent_config.get("agent_radius", 1.0)
+    model = config.get("concentration_model", "top-hat")
+    
+    y_coords = np.linspace(0.0, world_h, 25)
+    for y in y_coords:
+        pos = np.array([x, y])
+        if model == "gaussian":
+            conc = calculate_concentration_gaussian_numba(pos, plume.puffs_array)
+        else:
+            conc = calculate_concentration_numba(pos, agent_radius, plume.puffs_array)
+        if conc > conc_thresh:
+            return True
+    return False
+
+
 # ======================================================================================
 # MEANDER MODEL DEFINITIONS
 # ======================================================================================
@@ -379,20 +400,36 @@ class Agent:
         self.first_detection_pos = None
         self.mission_complete = False
         self.circling_step = 0
+        self.circling_angle = 0.0
         self.prev_dist_to_detection = None
         self.skirting_side_ida = None
         self.battery = self.battery_capacity
+        self.return_waypoint_reached = False
+        self.theta = 0.0
 
-    def get_circling_target(self):
+    def get_circling_target(self, dt):
         source_pos = np.array(self.config["source_position"])
-        radius = self.config.get("agent_config", {}).get("success_distance", 2.0) * 1.5
-        total_steps = 16
-        angle = (self.circling_step / total_steps) * 2 * np.pi
-        target = source_pos + np.array([radius * np.cos(angle), radius * np.sin(angle)])
+        radius = self.config.get("agent_config", {}).get("success_distance", 2.0) * 1.0
+        ida_side = self.skirting_side_ida if self.skirting_side_ida is not None else 1.0
+        
+        if self.circling_step == 0:
+            self.circling_angle = np.pi / 2.0 if ida_side == 1.0 else 3.0 * np.pi / 2.0
+            
+        # Update angle smoothly at physical speed (v/R * dt)
+        angular_speed = self.speed / radius
+        if ida_side == 1.0:
+            self.circling_angle += angular_speed * dt
+            if self.circling_angle >= 3.0 * np.pi / 2.0:
+                self.state = "returning"
+                print(f"\n[Agent] Circling complete! State changed to RETURNING. Goal: {self.first_detection_pos}")
+        else:
+            self.circling_angle -= angular_speed * dt
+            if self.circling_angle <= np.pi / 2.0:
+                self.state = "returning"
+                print(f"\n[Agent] Circling complete! State changed to RETURNING. Goal: {self.first_detection_pos}")
+                
+        target = source_pos + np.array([radius * np.cos(self.circling_angle), radius * np.sin(self.circling_angle)])
         self.circling_step += 1
-        if self.circling_step >= total_steps:
-            self.state = "returning"
-            print(f"\n[Agent] Circling complete! State changed to RETURNING. Goal: {self.first_detection_pos}")
         return target
 
     def measure_flow(self, plume):
@@ -804,7 +841,8 @@ class PlumeRLWrapper(gym.Env):
                 # Abort check
                 speed = self.config["agent_config"]["agent_speed"]
                 dist_source_to_start = np.linalg.norm(source_pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
-                circling_dist = 16 * speed * dt
+                radius = success_distance * 1.0
+                circling_dist = np.pi * radius
                 total_dist = dist_to_source + circling_dist + dist_source_to_start
                 est_time = total_dist / speed
                 est_battery_needed = est_time * base_decay * 1.3
@@ -814,14 +852,27 @@ class PlumeRLWrapper(gym.Env):
 
         # --- Circling source is handled programmatically ---
         if self.state == "circling_source":
-            radius = success_distance * 1.5
-            total_steps = 16
-            angle = (self.circling_step / total_steps) * 2 * np.pi
-            self.pos = source_pos + np.array([radius * np.cos(angle), radius * np.sin(angle)])
+            radius = success_distance * 1.0
+            ida_side = self.skirting_side_ida if self.skirting_side_ida is not None else 1.0
+            
+            if self.circling_step == 0:
+                self.circling_angle = np.pi / 2.0 if ida_side == 1.0 else 3.0 * np.pi / 2.0
+                
+            # Update angle smoothly at physical speed (v/R * dt)
+            angular_speed = self.speed / radius
+            if ida_side == 1.0:
+                self.circling_angle += angular_speed * dt
+                if self.circling_angle >= 3.0 * np.pi / 2.0:
+                    self.state = "returning"
+                    self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
+            else:
+                self.circling_angle -= angular_speed * dt
+                if self.circling_angle <= np.pi / 2.0:
+                    self.state = "returning"
+                    self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
+                    
+            self.pos = source_pos + np.array([radius * np.cos(self.circling_angle), radius * np.sin(self.circling_angle)])
             self.circling_step += 1
-            if self.circling_step >= total_steps:
-                self.state = "returning"
-                self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
             
             # Move plume and increment time
             self.plume.update(dt, self.time)
@@ -1094,29 +1145,82 @@ class QLearningSimAgent(Agent):
                 is_4tuple = True
 
         if self.state == "returning" and is_4tuple:
-            dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos)
-            if dist_to_detection < 0.1:
-                # Close to return point: ignore skirting and go straight to it!
-                goal_vec = self.first_detection_pos - self.pos
+            if self.first_detection_pos is None:
+                return self.pos, {"action": "returning_idle"}
+            center_y = self.config["world_height"] / 2.0
+            skirting_side_ida = 1 if self.first_detection_pos[1] >= center_y else -1
+
+            # Phase 1: Return on the OPPOSITE side of the plume, contouring the boundary downwind towards center_y.
+            # Once the plume no longer exists at the agent's current X coordinate, we turn back and contour the top boundary.
+            opposite_side = -skirting_side_ida
+            on_returning_side = (self.pos[1] < center_y) if opposite_side == -1.0 else (self.pos[1] >= center_y)
+
+            # Check if we reached the X coordinate of detection point after the contour has been completed
+            reached_detection_x = False
+            if self.return_waypoint_reached and not on_returning_side:
+                if self.pos[0] <= self.first_detection_pos[0]:
+                    reached_detection_x = True
+
+            if reached_detection_x:
+                goal_vec = np.array([0.0, self.first_detection_pos[1] - self.pos[1]])
                 goal_norm = np.linalg.norm(goal_vec)
                 target_pos = self.pos + (goal_vec / goal_norm) * self.speed * dt if goal_norm > 1e-6 else self.pos
-                return target_pos, {"action": "heuristic_return"}
+                return target_pos, {"action": "returning_vertical_final"}
 
-            # Fallback to boundary-skirting return heuristic
+            # Initialize self.theta if not present or 0.0
+            if not hasattr(self, 'theta') or self.theta is None or self.theta == 0.0:
+                self.theta = -np.pi / 4.0 if opposite_side == -1.0 else np.pi / 4.0
+
+            # Dynamic steering logic based on concentration
+            omega = 1.8  # turning rate in rad/s
             conc_thresh = self.config.get("agent_config", {}).get("agent_concentration_threshold", 1.0)
             if self.current_concentration > conc_thresh:
-                # We are inside the plume: move crosswind to exit it
-                center_y = self.config["world_height"] / 2.0
-                side = 1.0 if self.pos[1] >= center_y else -1.0
-                skirt_vec = np.array([0.0, side])
-                target_pos = self.pos + skirt_vec * self.speed * dt
-                return target_pos, {"action": "skirting_crosswind"}
+                # Inside: turn away from center
+                if opposite_side == -1.0:
+                    self.theta -= omega * dt
+                else:
+                    self.theta += omega * dt
             else:
-                # Outside or on the boundary: move towards the return point
-                goal_vec = self.first_detection_pos - self.pos
-                goal_norm = np.linalg.norm(goal_vec)
-                target_pos = self.pos + (goal_vec / goal_norm) * self.speed * dt if goal_norm > 1e-6 else self.pos
-                return target_pos, {"action": "skirting_downwind"}
+                # Outside: turn towards center
+                if opposite_side == -1.0:
+                    self.theta += omega * dt
+                else:
+                    self.theta -= omega * dt
+
+            # Update return state
+            if not self.return_waypoint_reached:
+                if self.pos[0] >= self.first_detection_pos[0]:
+                    if hasattr(self, 'plume') and self.plume is not None:
+                        if not plume_exists_at_x(self.pos[0], self.plume, self.config):
+                            self.return_waypoint_reached = True
+                    else:
+                        if self.pos[0] >= self.first_detection_pos[0] + 15.0:
+                            self.return_waypoint_reached = True
+                
+                if self.pos[0] >= 98.0:
+                    self.return_waypoint_reached = True
+
+            # Clip theta depending on returning phase to follow silhouette dynamically
+            if not self.return_waypoint_reached:
+                # Phase 1: downwind boundary following (limit heading to downwind directions)
+                self.theta = np.clip(self.theta, -np.pi/3, np.pi/3)
+            else:
+                # Phase 2: crossing the end or returning upwind
+                if on_returning_side:
+                    # Crossing the end of the plume: allow turning around the end (up to 180 degrees)
+                    if opposite_side == -1.0:
+                        self.theta = np.clip(self.theta, -np.pi/3, np.pi)
+                    else:
+                        self.theta = np.clip(self.theta, -np.pi, np.pi/3)
+                else:
+                    # Returning on the original side (limit heading to upwind directions)
+                    if opposite_side == -1.0:
+                        self.theta = np.clip(self.theta, np.pi/2, 1.5 * np.pi)
+                    else:
+                        self.theta = np.clip(self.theta, -1.5 * np.pi, -np.pi/2)
+
+            target_pos = self.pos + np.array([np.cos(self.theta), np.sin(self.theta)]) * self.speed * dt
+            return target_pos, {"action": "returning_steering", "theta": self.theta}
 
         # Build the exact same observation as PlumeRLWrapper
         if self.state == "returning":
@@ -1204,6 +1308,7 @@ class Simulator:
         self.logger = DataLogger(self.config, self.current_experiment)
         self.simulation_time = 0.0
         self.plume = FilamentPlume(self.config)
+        self.agent.plume = self.plume
         self.agent.reset()
 
     def step(self):
@@ -1236,7 +1341,8 @@ class Simulator:
                 # Early safety abort check
                 speed = self.agent.speed
                 dist_source_to_start = np.linalg.norm(source_pos - self.agent.first_detection_pos) if self.agent.first_detection_pos is not None else 0.0
-                circling_dist = 16 * speed * dt
+                radius = success_distance * 1.0
+                circling_dist = np.pi * radius
                 total_dist = dist_to_source + circling_dist + dist_source_to_start
                 est_time = total_dist / speed
                 base_decay = self.agent.battery_base_decay
@@ -1258,7 +1364,7 @@ class Simulator:
         old_pos = self.agent.pos.copy()
 
         if self.agent.state == "circling_source":
-            target_pos = self.agent.get_circling_target()
+            target_pos = self.agent.get_circling_target(dt)
             custom_data = {"state": "circling_source", "step": self.agent.circling_step}
             self.agent.move(target_pos, dt)
         elif self.agent.state == "following_boundary":
@@ -1283,35 +1389,73 @@ class Simulator:
                 custom_data = {"state": "following_skirting_upwind"}
             self.agent.move(target_pos, dt)
         elif self.agent.state == "returning":
-            dist_to_detection = np.linalg.norm(self.agent.pos - self.agent.first_detection_pos)
-            dist_to_detection_thresh = self.config.get("agent_config", {}).get("dist_to_detection", 5.0)
-            if dist_to_detection < dist_to_detection_thresh:
-                # Close to return point: ignore skirting and go straight to it!
-                goal_vec = self.agent.first_detection_pos - self.agent.pos
+            center_y = self.config["world_height"] / 2.0
+            opposite_side = -self.agent.skirting_side_ida if self.agent.skirting_side_ida is not None else -1.0
+            on_returning_side = (self.agent.pos[1] < center_y) if opposite_side == -1.0 else (self.agent.pos[1] >= center_y)
+
+            # Check if we reached the X coordinate of detection point after the contour has been completed
+            reached_detection_x = False
+            if self.agent.return_waypoint_reached and not on_returning_side:
+                if self.agent.pos[0] <= self.agent.first_detection_pos[0]:
+                    reached_detection_x = True
+
+            if reached_detection_x:
+                goal_vec = np.array([0.0, self.agent.first_detection_pos[1] - self.agent.pos[1]])
                 goal_norm = np.linalg.norm(goal_vec)
                 target_pos = self.agent.pos + (goal_vec / goal_norm) * self.agent.speed * dt if goal_norm > 1e-6 else self.agent.pos
-                custom_data = {"state": "returning_heuristic"}
+                custom_data = {"state": "returning_vertical_final"}
+                self.agent.move(target_pos, dt)
             else:
-                # Plume skirting on return for ALL agents
+                # Initialize agent.theta if not present or 0.0
+                if not hasattr(self.agent, 'theta') or self.agent.theta is None or self.agent.theta == 0.0:
+                    self.agent.theta = -np.pi / 4.0 if opposite_side == -1.0 else np.pi / 4.0
+
+                # Dynamic steering logic based on concentration
+                omega = 1.8  # turning rate in rad/s
                 if self.agent.current_concentration > conc_thresh:
-                    # We are inside the plume: move crosswind to exit it
-                    if self.agent.skirting_side_ida is not None:
-                        # Force the OPPOSITE side of the plume on return!
-                        side = -self.agent.skirting_side_ida
+                    # Inside: turn away from center
+                    if opposite_side == -1.0:
+                        self.agent.theta -= omega * dt
                     else:
-                        center_y = self.config["world_height"] / 2.0
-                        side = 1.0 if self.agent.pos[1] >= center_y else -1.0
-                        
-                    skirt_vec = np.array([0.0, side])
-                    target_pos = self.agent.pos + skirt_vec * self.agent.speed * dt
-                    custom_data = {"state": "returning_skirting_crosswind"}
+                        self.agent.theta += omega * dt
                 else:
-                    # Outside or on the boundary: move towards the detection point
-                    goal_vec = self.agent.first_detection_pos - self.agent.pos
-                    goal_norm = np.linalg.norm(goal_vec)
-                    target_pos = self.agent.pos + (goal_vec / goal_norm) * self.agent.speed * dt if goal_norm > 1e-6 else self.agent.pos
-                    custom_data = {"state": "returning_skirting_downwind"}
-            self.agent.move(target_pos, dt)
+                    # Outside: turn towards center
+                    if opposite_side == -1.0:
+                        self.agent.theta += omega * dt
+                    else:
+                        self.agent.theta -= omega * dt
+
+                # Update return state
+                if not self.agent.return_waypoint_reached:
+                    if self.agent.pos[0] >= self.agent.first_detection_pos[0]:
+                        if not plume_exists_at_x(self.agent.pos[0], self.plume, self.config):
+                            self.agent.return_waypoint_reached = True
+                    
+                    if self.agent.pos[0] >= 98.0:
+                        self.agent.return_waypoint_reached = True
+
+                # Clip theta depending on returning phase to follow silhouette dynamically
+                if not self.agent.return_waypoint_reached:
+                    # Phase 1: downwind boundary following (limit heading to downwind directions)
+                    self.agent.theta = np.clip(self.agent.theta, -np.pi/3, np.pi/3)
+                else:
+                    # Phase 2: crossing the end or returning upwind
+                    if on_returning_side:
+                        # Crossing the end of the plume: allow turning around the end (up to 180 degrees)
+                        if opposite_side == -1.0:
+                            self.agent.theta = np.clip(self.agent.theta, -np.pi/3, np.pi)
+                        else:
+                            self.agent.theta = np.clip(self.agent.theta, -np.pi, np.pi/3)
+                    else:
+                        # Returning on the original side (limit heading to upwind directions)
+                        if opposite_side == -1.0:
+                            self.agent.theta = np.clip(self.agent.theta, np.pi/2, 1.5 * np.pi)
+                        else:
+                            self.agent.theta = np.clip(self.agent.theta, -1.5 * np.pi, -np.pi/2)
+
+                target_pos = self.agent.pos + np.array([np.cos(self.agent.theta), np.sin(self.agent.theta)]) * self.agent.speed * dt
+                custom_data = {"state": "returning_steering", "theta": self.agent.theta}
+                self.agent.move(target_pos, dt)
         else:
             target_pos, custom_data = self.agent.run_search_algorithm(dt)
             self.agent.move(target_pos, dt)

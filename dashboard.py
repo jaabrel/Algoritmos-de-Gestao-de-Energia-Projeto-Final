@@ -247,7 +247,6 @@ class DashboardApp:
         criar_campo(col_dir, "Fator Vento Bateria:", "battery_wind_factor")
         criar_campo(col_dir, "Limiar Deteção Odor:", "agent_config", "agent_concentration_threshold")
         criar_campo(col_dir, "Distância de Sucesso:", "agent_config", "success_distance")
-        criar_campo(col_dir, "Dist. Direta Regresso:", "agent_config", "dist_to_detection")
         
         # Botão de Salvar
         btn_salvar = ttk.Button(self.tab_config, text="💾 Guardar Configurações", command=self.salvar_configuracoes)
