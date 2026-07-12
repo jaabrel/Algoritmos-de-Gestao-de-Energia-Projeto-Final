@@ -401,6 +401,7 @@ class Agent:
         self.mission_complete = False
         self.circling_step = 0
         self.circling_angle = 0.0
+        self.source_reached = False
         self.prev_dist_to_detection = None
         self.skirting_side_ida = None
         self.battery = self.battery_capacity
@@ -421,11 +422,13 @@ class Agent:
             self.circling_angle += angular_speed * dt
             if self.circling_angle >= 3.0 * np.pi / 2.0:
                 self.state = "returning"
+                self.source_reached = False
                 print(f"\n[Agent] Circling complete! State changed to RETURNING. Goal: {self.first_detection_pos}")
         else:
             self.circling_angle -= angular_speed * dt
             if self.circling_angle <= np.pi / 2.0:
                 self.state = "returning"
+                self.source_reached = False
                 print(f"\n[Agent] Circling complete! State changed to RETURNING. Goal: {self.first_detection_pos}")
                 
         target = source_pos + np.array([radius * np.cos(self.circling_angle), radius * np.sin(self.circling_angle)])
@@ -834,10 +837,11 @@ class PlumeRLWrapper(gym.Env):
                 self.first_detection_pos = self.pos.copy()
 
         elif self.state == "following_boundary":
-            if dist_to_source < success_distance:
-                self.state = "circling_source"
+            if dist_to_source < success_distance and not self.source_reached:
+                self.source_reached = True
                 self.circling_step = 0
-            else:
+            
+            if not self.source_reached:
                 # Abort check
                 speed = self.config["agent_config"]["agent_speed"]
                 dist_source_to_start = np.linalg.norm(source_pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
@@ -850,8 +854,8 @@ class PlumeRLWrapper(gym.Env):
                     self.state = "returning"
                     self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
 
-        # --- Circling source is handled programmatically ---
-        if self.state == "circling_source":
+        # --- Circling source is handled programmatically as part of following_boundary ---
+        if self.state == "following_boundary" and self.source_reached:
             radius = success_distance * 1.0
             ida_side = self.skirting_side_ida if self.skirting_side_ida is not None else 1.0
             
@@ -864,11 +868,13 @@ class PlumeRLWrapper(gym.Env):
                 self.circling_angle += angular_speed * dt
                 if self.circling_angle >= 3.0 * np.pi / 2.0:
                     self.state = "returning"
+                    self.source_reached = False
                     self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
             else:
                 self.circling_angle -= angular_speed * dt
                 if self.circling_angle <= np.pi / 2.0:
                     self.state = "returning"
+                    self.source_reached = False
                     self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
                     
             self.pos = source_pos + np.array([radius * np.cos(self.circling_angle), radius * np.sin(self.circling_angle)])
@@ -1333,11 +1339,12 @@ class Simulator:
                 print(f"\n[Simulator] Plume DETECTED at {self.agent.first_detection_pos}! Following boundary to source.")
 
         elif self.agent.state == "following_boundary":
-            if dist_to_source < success_distance:
-                self.agent.state = "circling_source"
+            if dist_to_source < success_distance and not self.agent.source_reached:
+                self.agent.source_reached = True
                 self.agent.circling_step = 0
                 print(f"\n[Simulator] Source REACHED! Starting circling/contouring maneuver.")
-            else:
+            
+            if not self.agent.source_reached:
                 # Early safety abort check
                 speed = self.agent.speed
                 dist_source_to_start = np.linalg.norm(source_pos - self.agent.first_detection_pos) if self.agent.first_detection_pos is not None else 0.0
@@ -1352,9 +1359,6 @@ class Simulator:
                     self.agent.prev_dist_to_detection = np.linalg.norm(self.agent.pos - self.agent.first_detection_pos) if self.agent.first_detection_pos is not None else 0.0
                     print(f"\n[Simulator] Low battery safety trigger! Remaining: {self.agent.battery:.1f}, Needed: {est_battery_needed:.1f}. Aborting and returning early!")
 
-        elif self.agent.state == "circling_source":
-            pass
-
         elif self.agent.state == "returning":
             dist_to_detection = np.linalg.norm(self.agent.pos - self.agent.first_detection_pos)
             if dist_to_detection < success_distance:
@@ -1363,31 +1367,32 @@ class Simulator:
 
         old_pos = self.agent.pos.copy()
 
-        if self.agent.state == "circling_source":
-            target_pos = self.agent.get_circling_target(dt)
-            custom_data = {"state": "circling_source", "step": self.agent.circling_step}
-            self.agent.move(target_pos, dt)
-        elif self.agent.state == "following_boundary":
-            # Skirt the plume on the way to the source (Searching for Origin) for ALL agents!
-            if self.agent.current_concentration > conc_thresh:
-                # We are inside the plume: move crosswind to exit it
-                center_y = self.config["world_height"] / 2.0
-                side = 1.0 if self.agent.pos[1] >= center_y else -1.0
-                
-                # Record the side we used during the upwind trip!
-                if self.agent.skirting_side_ida is None:
-                    self.agent.skirting_side_ida = side
-                
-                skirt_vec = np.array([0.0, side])
-                target_pos = self.agent.pos + skirt_vec * self.agent.speed * dt
-                custom_data = {"state": "following_skirting_crosswind"}
+        if self.agent.state == "following_boundary":
+            if self.agent.source_reached:
+                target_pos = self.agent.get_circling_target(dt)
+                custom_data = {"state": "circling_source", "step": self.agent.circling_step}
+                self.agent.move(target_pos, dt)
             else:
-                # Outside or on the boundary: move towards the source
-                goal_vec = source_pos - self.agent.pos
-                goal_norm = np.linalg.norm(goal_vec)
-                target_pos = self.agent.pos + (goal_vec / goal_norm) * self.agent.speed * dt if goal_norm > 1e-6 else self.agent.pos
-                custom_data = {"state": "following_skirting_upwind"}
-            self.agent.move(target_pos, dt)
+                # Skirt the plume on the way to the source (Searching for Origin) for ALL agents!
+                if self.agent.current_concentration > conc_thresh:
+                    # We are inside the plume: move crosswind to exit it
+                    center_y = self.config["world_height"] / 2.0
+                    side = 1.0 if self.agent.pos[1] >= center_y else -1.0
+                    
+                    # Record the side we used during the upwind trip!
+                    if self.agent.skirting_side_ida is None:
+                        self.agent.skirting_side_ida = side
+                    
+                    skirt_vec = np.array([0.0, side])
+                    target_pos = self.agent.pos + skirt_vec * self.agent.speed * dt
+                    custom_data = {"state": "following_skirting_crosswind"}
+                else:
+                    # Outside or on the boundary: move towards the source
+                    goal_vec = source_pos - self.agent.pos
+                    goal_norm = np.linalg.norm(goal_vec)
+                    target_pos = self.agent.pos + (goal_vec / goal_norm) * self.agent.speed * dt if goal_norm > 1e-6 else self.agent.pos
+                    custom_data = {"state": "following_skirting_upwind"}
+                self.agent.move(target_pos, dt)
         elif self.agent.state == "returning":
             center_y = self.config["world_height"] / 2.0
             opposite_side = -self.agent.skirting_side_ida if self.agent.skirting_side_ida is not None else -1.0
