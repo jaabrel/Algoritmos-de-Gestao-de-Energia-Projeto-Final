@@ -147,7 +147,7 @@ class OU_MeanderModel(MeanderModel):
 
 
 class Sinusoid_MeanderModel(MeanderModel):
- 
+
 
     def __init__(self, main_config, model_config):
         super().__init__(main_config, model_config)
@@ -267,7 +267,7 @@ class FilamentPlume:
     def __init__(self, config):
         self.config = config
         self.source_pos = np.array(config["source_position"])
-        
+
         # Static pre-allocated array initialization
         # A estrutura das 5 colunas do puffs_array é:
         # Coluna 0: Posição X (x)
@@ -302,7 +302,7 @@ class FilamentPlume:
         if puffs_to_release > 0:
             # Encontrar índices de slots inativos (massa <= min_mass)
             inactive_indices = np.where(self.puffs_array[:, 3] <= min_mass)[0]
-            
+
             # Fallback de crescimento dinâmico se a capacidade for excedida
             if puffs_to_release > len(inactive_indices):
                 print(f"Warning: Plume puffs array capacity exceeded. Resizing dynamically from {self.max_puffs} to {self.max_puffs * 2}.")
@@ -311,9 +311,9 @@ class FilamentPlume:
                 self.puffs_array = np.zeros((self.max_puffs, 5), dtype=np.float32)
                 self.puffs_array[:old_puffs.shape[0]] = old_puffs
                 inactive_indices = np.where(self.puffs_array[:, 3] <= min_mass)[0]
-                
+
             slots_to_use = inactive_indices[:puffs_to_release]
-            
+
             if len(slots_to_use) > 0:
                 self.puffs_array[slots_to_use, 0] = self.source_pos[0]
                 # For the sum_of_sinusoids model, we set the initial vertical offset at release.
@@ -322,15 +322,15 @@ class FilamentPlume:
                     self.puffs_array[slots_to_use, 1] = self.source_pos[1] + meandering_vy
                 else:
                     self.puffs_array[slots_to_use, 1] = self.source_pos[1]
-                
+
                 self.puffs_array[slots_to_use, 2] = 0.0
                 self.puffs_array[slots_to_use, 3] = self.config["initial_puff_mass"]
                 self.puffs_array[slots_to_use, 4] = 0.0
-                
+
             self.time_since_last_puff = 0.0
 
         if self.puffs_array.shape[0] > 0:
- 
+
             meander_val = 0.0 if self.config.get("meander_model", "ou") == "sum_of_sinusoids" else meandering_vy
             self.puffs_array = update_puffs_numba(
                 self.puffs_array,
@@ -775,11 +775,11 @@ class PlumeRLWrapper(gym.Env):
         flow_vec = np.array(self.config["mean_wind_velocity"]) + np.array([0.0, vy])
         opposing_wind = -flow_vec
         wind_resistance = np.dot(direction, opposing_wind)
-        
+
         base_decay = self.config.get("battery_base_decay", 1.0)
         wind_factor = self.config.get("battery_wind_factor", 0.5)
         min_decay = self.config.get("battery_min_decay", 0.1)
-        
+
         drain_rate = max(min_decay, base_decay + wind_factor * wind_resistance)
         self.last_drain = drain_rate * dt
         self.battery = max(0.0, self.battery - self.last_drain)
@@ -822,7 +822,7 @@ class PlumeRLWrapper(gym.Env):
             if self.circling_step >= total_steps:
                 self.state = "returning"
                 self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
-            
+
             # Move plume and increment time
             self.plume.update(dt, self.time)
             self.time += dt
@@ -836,7 +836,7 @@ class PlumeRLWrapper(gym.Env):
 
         # --- Normal step movement (for searching, following, returning) ---
         target = self.pos + dirs[action] * self.config["agent_config"]["agent_speed"] * dt
-        
+
         hit_boundary = False
         if (target[0] < 0.0 or target[0] > self.config["world_width"] or
             target[1] < 0.0 or target[1] > self.config["world_height"]):
@@ -885,28 +885,28 @@ class PlumeRLWrapper(gym.Env):
         if self.state == "returning":
             if at_goal:
                 return 500.0  # Terminal reward for returning
-            
+
             reward = -0.05  # Step penalty
             dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos)
             if not hasattr(self, 'prev_dist_to_detection') or self.prev_dist_to_detection is None:
                 self.prev_dist_to_detection = dist_to_detection
             delta_dist = dist_to_detection - self.prev_dist_to_detection
             self.prev_dist_to_detection = dist_to_detection
-            
+
             # Reward for moving closer to first_detection_pos
             reward += -delta_dist * 10.0
-            
+
             # No revisit penalty when returning to first detection point (as requested by user)
             reward -= self.reward_config.get("battery_drain_penalty_factor", 0.5) * self.last_drain
             return reward
-            
+
         else:
             # --- Searching / Following Boundary rewards ---
             source_pos = np.array(self.config["source_position"])
             dist_to_source = np.linalg.norm(self.pos - source_pos)
             if dist_to_source < self.config["agent_config"]["success_distance"]:
                 return 100.0  # reached source bonus!
-                
+
             reward = self.reward_config["step_penalty"]
 
             # Boundary following reward:
@@ -915,7 +915,7 @@ class PlumeRLWrapper(gym.Env):
                 deviation = abs(conc - threshold)
                 boundary_reward = 2.0 * np.exp(-deviation)
                 reward += boundary_reward
-                
+
                 # Wind upwind navigation progress
                 mean_wind = np.array(self.config["mean_wind_velocity"])
                 if np.linalg.norm(mean_wind) > 1e-6:
@@ -1039,17 +1039,17 @@ class QLearningSimAgent(Agent):
             agent_speed = self.config.get("agent_config", {}).get("agent_speed", 3.0)
             cast_angle_deg = self.config.get("agent_config", {}).get("cast_angle", 60.0)
             cast_length = self.config.get("agent_config", {}).get("cast_length", 6.0)
-            
+
             if not hasattr(self, "search_zig_zag_dir"):
                 self.search_zig_zag_dir = 1 if np.random.rand() > 0.5 else -1
                 self.search_steps_in_dir = 0.0
-                
+
             flow_norm = np.linalg.norm(self.measured_flow_direction)
             if flow_norm > 1e-6:
                 upwind_dir = -self.measured_flow_direction / flow_norm
             else:
                 upwind_dir = np.array([-1.0, 0.0])  # default to Left (against typical wind)
-                
+
             # Rotate upwind direction by cast_angle in the current direction sign
             angle_rad = np.deg2rad(cast_angle_deg * self.search_zig_zag_dir)
             rot_matrix = np.array([
@@ -1057,24 +1057,24 @@ class QLearningSimAgent(Agent):
                 [np.sin(angle_rad), np.cos(angle_rad)]
             ])
             move_dir = rot_matrix @ upwind_dir
-            
+
             # Step distance
             step_dist = agent_speed * dt
             target_pos = self.pos + move_dir * step_dist
-            
+
             # Update distance in current direction
             self.search_steps_in_dir += step_dist
-            
+
             # Check boundaries (top and bottom with 2.0 margin)
             world_h = self.config["world_height"]
             margin = 2.0
             hit_wall = (target_pos[1] < margin and self.search_zig_zag_dir == -1) or \
                        (target_pos[1] > world_h - margin and self.search_zig_zag_dir == 1)
-                       
+
             if self.search_steps_in_dir >= cast_length or hit_wall:
                 self.search_zig_zag_dir *= -1
                 self.search_steps_in_dir = 0.0
-                
+
                 # Recompute target_pos in the new direction
                 angle_rad = np.deg2rad(cast_angle_deg * self.search_zig_zag_dir)
                 rot_matrix = np.array([
@@ -1083,7 +1083,7 @@ class QLearningSimAgent(Agent):
                 ])
                 move_dir = rot_matrix @ upwind_dir
                 target_pos = self.pos + move_dir * step_dist
-                
+
             return target_pos, {"action": f"searching_zigzag_{self.search_zig_zag_dir}"}
 
         # Check if the loaded model is a 4-tuple model (which does not support RL returning)
@@ -1267,11 +1267,11 @@ class Simulator:
                 # We are inside the plume: move crosswind to exit it
                 center_y = self.config["world_height"] / 2.0
                 side = 1.0 if self.agent.pos[1] >= center_y else -1.0
-                
+
                 # Record the side we used during the upwind trip!
                 if self.agent.skirting_side_ida is None:
                     self.agent.skirting_side_ida = side
-                
+
                 skirt_vec = np.array([0.0, side])
                 target_pos = self.agent.pos + skirt_vec * self.agent.speed * dt
                 custom_data = {"state": "following_skirting_crosswind"}
@@ -1301,7 +1301,7 @@ class Simulator:
                     else:
                         center_y = self.config["world_height"] / 2.0
                         side = 1.0 if self.agent.pos[1] >= center_y else -1.0
-                        
+
                     skirt_vec = np.array([0.0, side])
                     target_pos = self.agent.pos + skirt_vec * self.agent.speed * dt
                     custom_data = {"state": "returning_skirting_crosswind"}
@@ -1320,15 +1320,15 @@ class Simulator:
         displacement = self.agent.pos - old_pos
         dist_moved = np.linalg.norm(displacement)
         direction = displacement / dist_moved if dist_moved > 1e-6 else np.array([0.0, 0.0])
-        
+
         flow_vec = self.agent.measured_flow_direction
         opposing_wind = -flow_vec
         wind_resistance = np.dot(direction, opposing_wind)
-        
+
         base_decay = self.agent.battery_base_decay
         wind_factor = self.agent.battery_wind_factor
         min_decay = self.agent.battery_min_decay
-        
+
         drain_rate = max(min_decay, base_decay + wind_factor * wind_resistance)
         drain = drain_rate * dt
         self.agent.battery = max(0.0, self.agent.battery - drain)
@@ -1579,28 +1579,28 @@ class Simulator:
 
         if hasattr(self, 'agent_sprite') and self.agent_sprite is not None:
             sprite = self.agent_sprite
-            
+
             # Não rodar a imagem, manter a original
             rotated_sprite = sprite
             bound_w = sprite.shape[1]
             bound_h = sprite.shape[0]
-            
+
             if rotated_sprite.shape[2] == 4:
                 bgr = rotated_sprite[:, :, :3]
                 alpha = rotated_sprite[:, :, 3] / 255.0
             else:
                 bgr = rotated_sprite
                 alpha = np.ones(bgr.shape[:2])
-                
+
             top_left_x = agent_px[0] - bound_w // 2
             top_left_y = agent_px[1] - bound_h // 2
-            
+
             y1, y2 = max(0, top_left_y), min(canvas.shape[0], top_left_y + bound_h)
             x1, x2 = max(0, top_left_x), min(canvas.shape[1], top_left_x + bound_w)
-            
+
             y1o, y2o = max(0, -top_left_y), min(bound_h, canvas.shape[0] - top_left_y)
             x1o, x2o = max(0, -top_left_x), min(bound_w, canvas.shape[1] - top_left_x)
-            
+
             if y1 < y2 and x1 < x2:
                 alpha_crop = alpha[y1o:y2o, x1o:x2o, np.newaxis]
                 canvas[y1:y2, x1:x2] = (alpha_crop * bgr[y1o:y2o, x1o:x2o] + (1 - alpha_crop) * canvas[y1:y2, x1:x2]).astype(np.uint8)
@@ -1657,6 +1657,8 @@ if __name__ == "__main__":
     import glob
     import json
     import os
+    import tkinter as tk
+    from tkinter import ttk, messagebox
 
     DEFAULT_CONFIG = {
         "dt": 0.1,
@@ -1724,96 +1726,394 @@ if __name__ == "__main__":
         },
     }
 
+    import subprocess
+    import sys
+
+
     config_file_path = "config.json"
 
     if not os.path.exists(config_file_path):
         with open(config_file_path, "w") as f:
             json.dump(DEFAULT_CONFIG, f, indent=4)
 
+
+
     with open(config_file_path, "r") as f:
         CONFIG = json.load(f)
 
-    print("=" * 40)
-    print(" OPÇÕES DE TREINO:")
-    print(" 1. Treinar Modelo Q-Learning")
-    print(" 2. Executar Simulador (com Agente Q-Learning)")
-    print("=" * 40)
+    pasta_modelos = "modelos"
+    os.makedirs(pasta_modelos, exist_ok=True)
+    modelos = glob.glob(os.path.join(pasta_modelos, "qlearning_plume_*.pkl"))
+    modelos.sort(key=os.path.getmtime, reverse=True)
+    nomes_modelos = [os.path.basename(m) for m in modelos]
 
-    escolha = input("Escolha (1-2): ").strip()
-    if escolha == "1":
-        # TREINO
+    escolhas = {
+
+            "acao": None,
+
+            "tipo_treino": "novo",
+
+            "modelo_alvo": None,
+
+            "episodios": 3000,
+
+    }
+        # --- INÍCIO DA INTERFACE GRÁFICA ---
+    root = tk.Tk()
+
+    root.title("Lançador - Simulador de Pluma")
+
+    root.geometry("480x480")
+
+    style = ttk.Style(root)
+
+    style.theme_use("clam")
+
+
+
+        # Variáveis do Tkinter
+
+    var_acao = tk.StringVar(value="treinar")
+
+    var_tipo_treino = tk.StringVar(value="novo")
+
+    var_episodios = tk.StringVar(value="3000")
+
+    var_modelo = tk.StringVar()
+
+    var_modelo_simular = tk.StringVar()
+
+
+
+    if nomes_modelos:
+
+        var_modelo.set(nomes_modelos[0])
+
+        var_modelo_simular.set(nomes_modelos[0])
+
+
+
+    def atualizar_interface(*args):
+
+        """Ativa/Desativa/Mostra os frames dependendo da opção principal escolhida"""
+
+        frame_treino.pack_forget()
+
+        frame_simular.pack_forget()
+
+        frame_dashboard.pack_forget()
+
+
+
+        if var_acao.get() == "treinar":
+
+            frame_treino.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+            if var_tipo_treino.get() == "continuar":
+
+                combo_modelo_treino.config(state="readonly")
+
+            else:
+
+                combo_modelo_treino.config(state="disabled")
+
+            btn_iniciar.config(text="Iniciar")
+
+        elif var_acao.get() == "simular":
+
+            frame_simular.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+            btn_iniciar.config(text="Iniciar")
+
+        else:  # dashboard
+
+            frame_dashboard.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+            btn_iniciar.config(text="Abrir Dashboard")
+
+
+
+    def iniciar():
+
+        """Guarda as opções e fecha a janela para o script continuar"""
+        escolhas["acao"] = var_acao.get()
+
+
+
+        if escolhas["acao"] == "treinar":
+
+            escolhas["episodios"] = int(var_episodios.get() or 3000)
+
+            escolhas["tipo_treino"] = var_tipo_treino.get()
+
+            escolhas["modelo_alvo"] = (
+
+                var_modelo.get() if var_tipo_treino.get() == "continuar" else None
+
+            )
+
+        elif escolhas["acao"] == "simular":
+
+            escolhas["modelo_alvo"] = var_modelo_simular.get()
+
+            if not escolhas["modelo_alvo"]:
+
+                messagebox.showerror("Erro", "Nenhum modelo selecionado para simular!")
+
+                return
+
+
+
+        root.destroy()
+
+
+
+        # --- CONSTRUÇÃO DOS FRAMES ---
+
+    lbl_titulo = ttk.Label(root, text="Configuração de Execução", font=("Arial", 14, "bold"))
+
+    lbl_titulo.pack(pady=10)
+
+
+
+        # Frame de Seleção Principal
+
+    frame_modo = ttk.LabelFrame(root, text="Modo de Execução", padding=10)
+
+    frame_modo.pack(fill=tk.X, padx=10, pady=5)
+
+
+
+    ttk.Radiobutton(
+
+        frame_modo, text="Treinar Modelo Q-Learning", variable=var_acao,
+
+        value="treinar", command=atualizar_interface,
+
+    ).pack(anchor=tk.W)
+
+    ttk.Radiobutton(
+
+        frame_modo, text="Executar Simulador Visual", variable=var_acao,
+
+        value="simular", command=atualizar_interface,
+
+    ).pack(anchor=tk.W)
+
+    ttk.Radiobutton(
+
+        frame_modo, text="Abrir Dashboard de Análise", variable=var_acao,
+
+        value="dashboard", command=atualizar_interface,
+
+    ).pack(anchor=tk.W)
+
+
+
+        # Frame de Treino (Dinâmico)
+
+    frame_treino = ttk.LabelFrame(root, text="Opções de Treino", padding=10)
+
+
+
+    ttk.Radiobutton(
+
+        frame_treino, text="Iniciar Novo Treino (Do zero)", variable=var_tipo_treino,
+
+        value="novo", command=atualizar_interface,
+
+    ).pack(anchor=tk.W, pady=2)
+
+    ttk.Radiobutton(
+
+        frame_treino, text="Continuar Treino de um Modelo", variable=var_tipo_treino,
+
+        value="continuar", command=atualizar_interface,
+
+    ).pack(anchor=tk.W, pady=2)
+
+
+
+    combo_modelo_treino = ttk.Combobox(
+
+        frame_treino, textvariable=var_modelo, values=nomes_modelos,
+
+        state="disabled", width=40,
+
+    )
+
+    combo_modelo_treino.pack(pady=5)
+
+
+
+    lbl_ep = ttk.Label(frame_treino, text="Número de episódios:")
+
+    lbl_ep.pack(anchor=tk.W, pady=(10, 0))
+
+    entry_ep = ttk.Entry(frame_treino, textvariable=var_episodios, width=15)
+
+    entry_ep.pack(anchor=tk.W)
+
+
+
+        # Frame de Simulação (Dinâmico)
+
+    frame_simular = ttk.LabelFrame(root, text="Opções de Simulação", padding=10)
+
+
+
+    ttk.Label(frame_simular, text="Escolhe o modelo a testar:").pack(anchor=tk.W, pady=2)
+
+    combo_modelo_sim = ttk.Combobox(
+
+        frame_simular, textvariable=var_modelo_simular, values=nomes_modelos,
+
+        state="readonly", width=40,
+
+    )
+
+    combo_modelo_sim.pack(pady=5)
+
+
+
+    if not nomes_modelos:
+
+        ttk.Label(
+
+            frame_simular,
+
+            text="Nenhum modelo treinado encontrado na pasta 'modelos'.\nTreina um primeiro.",
+
+            foreground="#a33",
+
+        ).pack(anchor=tk.W, pady=(5, 0))
+
+
+
+        # Frame de Dashboard (Dinâmico)
+
+    frame_dashboard = ttk.LabelFrame(root, text="Dashboard de Análise", padding=10)
+
+    ttk.Label(
+
+        frame_dashboard,
+
+        text=(
+
+            "Abre a janela do Dashboard para consultar métricas de treino,\n"
+
+            "o mapa de rotas dos modelos guardados e editar o config.json."
+
+        ),
+
+        justify=tk.LEFT,
+
+    ).pack(anchor=tk.W, pady=5)
+
+
+
+        # Botão de Ação
+
+    btn_iniciar = ttk.Button(root, text="Iniciar", command=iniciar)
+
+    btn_iniciar.pack(side=tk.BOTTOM, pady=20, fill=tk.X, padx=20)
+
+
+
+        # Inicializa a interface corretamente
+
+    atualizar_interface()
+
+    root.mainloop()
+
+
+
+        # --- LÓGICA DE EXECUÇÃO APÓS A INTERFACE FECHAR ---
+
+
+
+        # Se a janela for fechada sem clicar em Iniciar, o script termina
+
+    if escolhas["acao"] is None:
+
+        print("Execução cancelada.")
+
+        sys.exit()
+
+
+
+    if escolhas["acao"] == "dashboard":
+
+        # Abre o dashboard.py como um processo separado (janela independente)
+
+        dashboard_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.py")
+
+        if not os.path.exists(dashboard_path):
+
+            print(f"[-] dashboard.py não encontrado em: {dashboard_path}")
+
+        else:
+
+            print(f"\nA abrir o Dashboard ({dashboard_path})...")
+
+            subprocess.Popen([sys.executable, dashboard_path])
+
+        sys.exit()
+
+
+
+    elif escolhas["acao"] == "treinar":
+
         env = PlumeRLWrapper(CONFIG)
+
         agent = RLQLearningAgent(env)
 
-        print("\n--- OPÇÕES DE TREINO ---")
-        print(" 1. Iniciar Novo Treino (Do zero)")
-        print(" 2. Continuar Treino de um Modelo Existente")
-        sub_escolha = input("Escolha (1-2): ").strip()
 
-        if sub_escolha == "2":
-            pasta_modelos = "modelos"
-            modelos = glob.glob(os.path.join(pasta_modelos, "qlearning_plume_*.pkl"))
-            if not modelos:
-                print("Nenhum modelo encontrado. A iniciar um novo treino do zero...")
+
+        if escolhas["tipo_treino"] == "continuar" and escolhas["modelo_alvo"]:
+
+            caminho_modelo = os.path.join(pasta_modelos, escolhas["modelo_alvo"])
+
+            if agent.load(caminho_modelo):
+
+                print(f"\n[!] A continuar o treino a partir do episódio {len(agent.episode_rewards)}")
+
+                print(f"[!] Epsilon atual (taxa de exploração): {agent.epsilon:.4f}")
+
             else:
-                modelos.sort(key=os.path.getmtime, reverse=True)
-                for i, m in enumerate(modelos):
-                    print(f" {i + 1}. {os.path.basename(m)}")
 
-                idx = input(
-                    f"\nQual modelo queres continuar a treinar? (1-{len(modelos)}): "
-                )
-                try:
-                    ficheiro_escolhido = modelos[int(idx) - 1]
-                    if agent.load(ficheiro_escolhido):
-                        print(
-                            f"\n[!] A continuar o treino a partir do episódio {len(agent.episode_rewards)}"
-                        )
-                        print(
-                            f"[!] Epsilon atual (taxa de exploração): {agent.epsilon:.4f}"
-                        )
-                except (ValueError, IndexError):
-                    print("Escolha inválida. A iniciar um novo treino do zero...")
+                print("[-] Erro ao carregar. A iniciar um novo treino do zero...")
 
-        episodios = int(
-            input("\nNúmero de episódios adicionais para treinar (ex:3000): ") or "3000"
-        )
+
+
+        episodios = escolhas["episodios"]
 
         agent.train(env, num_episodes=episodios, print_every=50)
+
         agent.save()
 
+
+
         if CONFIG["visualize"]:
+
             cv2.destroyAllWindows()
 
-    elif escolha == "2":
-        pasta_modelos = "modelos"
-        modelos = glob.glob(os.path.join(pasta_modelos, "qlearning_plume_*.pkl"))
-        if not modelos:
-            print(
-                f"Nenhum modelo treinado encontrado na pasta '{pasta_modelos}'. Treina um primeiro (Opção 1)."
-            )
-        else:
-            print("\nModelos disponíveis:")
-            modelos.sort(key=os.path.getmtime, reverse=True)
 
-            for i, m in enumerate(modelos):
-                nome_ficheiro = os.path.basename(m)
-                print(f" {i + 1}. {nome_ficheiro}")
 
-            idx = input(f"\nQual modelo queres testar? (1-{len(modelos)}): ")
-            try:
-                ficheiro_escolhido = modelos[int(idx) - 1]
+    elif escolhas["acao"] == "simular":
 
-                CONFIG["agent_class"] = "QLearningAgent"
-                CONFIG["model_to_load"] = ficheiro_escolhido
+        ficheiro_escolhido = os.path.join(pasta_modelos, escolhas["modelo_alvo"])
 
-                print(
-                    f"\nIniciando Simulador com: QLearningAgent usando {ficheiro_escolhido}"
-                )
-                sim = Simulator(CONFIG)
-                sim.run()
-            except (ValueError, IndexError):
-                print("Escolha inválida.")
 
-    else:
-        print("Escolha inválida")
+
+        CONFIG["agent_class"] = "QLearningAgent"
+
+        CONFIG["model_to_load"] = ficheiro_escolhido
+
+
+
+        print(f"\nIniciando Simulador com: QLearningAgent usando {ficheiro_escolhido}")
+
+        sim = Simulator(CONFIG)
+
+        sim.run()
