@@ -1987,22 +1987,29 @@ if __name__ == "__main__":
         """Guarda as opções e fecha a janela para o script continuar"""
         escolhas["acao"] = var_acao.get()
 
+        if escolhas["acao"] == "dashboard":
+            import matplotlib.pyplot as plt 
+            from dashboard import DashboardApp
 
+            janela_dashboard = tk.Toplevel(root)
+            app_dash = DashboardApp(janela_dashboard)
+
+            def fechar_dashboard():
+                plt.close('all')
+                janela_dashboard.destroy()
+
+            janela_dashboard.protocol("WM_DELETE_WINDOW", fechar_dashboard)
+            return
 
         if escolhas["acao"] == "treinar":
 
             escolhas["episodios"] = int(var_episodios.get() or 3000)
-
             escolhas["tipo_treino"] = var_tipo_treino.get()
-
             escolhas["modelo_alvo"] = (
-
                 var_modelo.get() if var_tipo_treino.get() == "continuar" else None
 
             )
-
         elif escolhas["acao"] == "simular":
-
             escolhas["modelo_alvo"] = var_modelo_simular.get()
 
             if not escolhas["modelo_alvo"]:
@@ -2189,29 +2196,7 @@ if __name__ == "__main__":
 
         sys.exit()
 
-
-
-    if escolhas["acao"] == "dashboard":
-
-        # Abre o dashboard.py como um processo separado (janela independente)
-
-        dashboard_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.py")
-
-        if not os.path.exists(dashboard_path):
-
-            print(f"[-] dashboard.py não encontrado em: {dashboard_path}")
-
-        else:
-
-            print(f"\nA abrir o Dashboard ({dashboard_path})...")
-
-            subprocess.Popen([sys.executable, dashboard_path])
-
-        sys.exit()
-
-
-
-    elif escolhas["acao"] == "treinar":
+    if escolhas["acao"] == "treinar":
 
         env = PlumeRLWrapper(CONFIG)
 

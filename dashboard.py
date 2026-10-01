@@ -55,12 +55,15 @@ class DashboardApp:
         self.tab_metricas = ttk.Frame(self.notebook)
         self.tab_mapa = ttk.Frame(self.notebook)
         self.tab_config = ttk.Frame(self.notebook)
+        self.tab_qtable = ttk.Frame(self.notebook)
 
         # --- Adicionar as páginas ao Notebook ---
         self.notebook.add(self.tab_metricas, text="Métricas de Treino")
         self.notebook.add(self.tab_mapa, text="Mapa de Rotas")
         self.notebook.add(self.tab_config, text="Configurações (JSON)")
+        self.notebook.add(self.tab_qtable, text="Visualizador Q-Table")
         
+        self.construir_aba_qtable()
         self.variaveis_form = {}
         self.construir_aba_configuracoes()
 
@@ -75,6 +78,50 @@ class DashboardApp:
         self.root.quit()
         self.root.destroy()
         sys.exit(0)
+
+    def construir_aba_qtable(self):
+        """Cria uma grelha de consulta da Q-Table"""
+        frame_tabela = ttk.Frame(self.tab_qtable, padding="10")
+        frame_tabela.pack(fill=tk.BOTH, expand=True)
+
+        colunas = ("estado", "q_up", "q_down", "q_left", "q_right", "melhor_acao")
+        self.tree_qtable = ttk.Treeview(frame_tabela, columns=colunas, show="headings", height=25)
+
+        self.tree_qtable.heading("estado", text="Estado (X, Y, Conc, Vento, Missão, Bat)")
+        self.tree_qtable.heading("q_up", text="Q(Cima)")
+        self.tree_qtable.heading("q_down", text="Q(Baixo)")
+        self.tree_qtable.heading("q_left", text="Q(Esquerda)")
+        self.tree_qtable.heading("q_right", text="Q(Direita)")
+        self.tree_qtable.heading("melhor_acao", text="Melhor Ação (Greedy)")
+        self.tree_qtable.column("estado", width=260, anchor=tk.CENTER)
+        for col in colunas[1:]:
+            self.tree_qtable.column(col, width=100, anchor=tk.CENTER)
+        
+        scrollbar = ttk.Scrollbar(frame_tabela, orient=tk.VERTICAL, command=self.tree_qtable.yview)
+        self.tree_qtable.configure(yscroll=scrollbar.set)
+
+        self.tree_qtable.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+
+    def atualizar_qtable_view(self, q_table):
+        """Limpa e preenche a grelha com os dados do modelo selecionado."""
+        for item in self.tree_qtable.get_children():
+            self.tree_qtable.delete(item)
+
+        acoes = ["Cima", "Baixo", "Esquerda", "Direita"]
+        for estado, q_vals in q_table.items():
+            melhor_idx = int(np.argmax(q_vals))
+            melhor = acoes[melhor_idx] if np.any(q_vals != 0) else "Neutro"
+            
+            self.tree_qtable.insert("", tk.END, values=(
+                str(estado),
+                f"{q_vals[0]:.2f}",
+                f"{q_vals[1]:.2f}",
+                f"{q_vals[2]:.2f}",
+                f"{q_vals[3]:.2f}",
+                melhor
+            ))
 
     def listar_modelos(self):
         """Procura todos os ficheiros .pkl e atualiza o dropdown."""
@@ -148,6 +195,7 @@ class DashboardApp:
         self.lbl_stats.config(text=texto_stats)
 
         self.desenhar_graficos(data)
+        self.atualizar_qtable_view(data.get("q_table", {}))
     
 
     def construir_aba_configuracoes(self):
