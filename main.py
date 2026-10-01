@@ -12,7 +12,7 @@ from QLearning import QLearningAgent as RLQLearningAgent
 
 
 # ======================================================================================
-# 1. HIGH-PERFORMANCE HELPER FUNCTIONS (NUMBA)
+# 1. FUNÇÕES AUXILIARES DE ALTO DESEMPENHO (COMPILAÇÃO JIT COM NUMBA)
 # ======================================================================================
 
 
@@ -21,7 +21,14 @@ def update_puffs_numba(
     puffs_array, dt, wind_velocity, meandering_vy, turbulence_intensity, puff_decay_rate, puff_expansion_rate, min_mass
 ):
     """
-    Updates the state of all puffs. This function is JIT-compiled by Numba for performance.
+    Atualiza o estado físico de todos os pacotes de odor (puffs) para o modelo padrão/OU.
+    Esta função é compilada com Numba (nopython) para máxima eficiência temporal.
+
+    Operações por pacote:
+    - Advecção pelo vento/corrente média e velocidade transversal de meandro.
+    - Perturbação turbulenta estocástica isotrópica (Browniana).
+    - Expansão volumétrica do raio proporcional à raiz quadrada da idade do puff.
+    - Decaimento exponencial da massa de odor por evaporação/dissipação.
     """
     num_puffs = puffs_array.shape[0]
     sqrt_dt = np.sqrt(dt)
@@ -30,16 +37,55 @@ def update_puffs_numba(
         if puffs_array[i, 3] <= min_mass:
             continue
 
+        # Advecção pelo escoamento médio e meandro transversal
         puffs_array[i, 0] += wind_velocity[0] * dt
         puffs_array[i, 1] += wind_velocity[1] * dt
         puffs_array[i, 1] += meandering_vy * dt
 
-        # Isotropic turbulence for a wider plume coverage
+        # Perturbação turbulenta isotrópica para dispersão natural
         turbulence_x = np.random.randn() * turbulence_intensity * sqrt_dt
         turbulence_y = np.random.randn() * turbulence_intensity * sqrt_dt
         puffs_array[i, 0] += turbulence_x
         puffs_array[i, 1] += turbulence_y
 
+        # Expansão radial e decaimento exponencial de massa
+        puffs_array[i, 2] = puff_expansion_rate * np.sqrt(puffs_array[i, 4])
+        puffs_array[i, 3] *= 1.0 - puff_decay_rate * dt
+        puffs_array[i, 4] += dt
+
+    return puffs_array
+
+
+@jit(nopython=True)
+def update_puffs_sinusoid_numba(
+    puffs_array, dt, current_time, src_x, src_y, wind_velocity, amplitude, frequency, turbulence_intensity, puff_decay_rate, puff_expansion_rate, min_mass
+):
+    """
+    Atualiza os pacotes de odor para o modelo de pluma sinusoidal meandrada.
+    Garante que a pluma emerge de forma contínua e centrada na fonte (src_x, src_y),
+    abrindo suavemente a amplitude ondulatória à medida que os pacotes avançam a jusante.
+    """
+    num_puffs = puffs_array.shape[0]
+    sqrt_dt = np.sqrt(dt)
+    vx = wind_velocity[0] if abs(wind_velocity[0]) > 1e-4 else 0.4
+    ramp_L = 5.0
+    two_pi_f = 2.0 * np.pi * frequency
+
+    for i in range(num_puffs):
+        if puffs_array[i, 3] <= min_mass:
+            continue
+
+        # Advecção longitudinal com turbulência
+        puffs_array[i, 0] += wind_velocity[0] * dt
+        puffs_array[i, 0] += np.random.randn() * turbulence_intensity * sqrt_dt
+
+        # Onda sinusoidal com rampa de transição suave a partir da fonte
+        dx = max(0.0, puffs_array[i, 0] - src_x)
+        ramp = np.tanh(dx / ramp_L)
+        target_center_y = src_y + amplitude * ramp * np.sin(two_pi_f * (current_time - dx / vx))
+
+        # Posição transversal com componente turbulenta
+        puffs_array[i, 1] = target_center_y + np.random.randn() * turbulence_intensity * sqrt_dt
         puffs_array[i, 2] = puff_expansion_rate * np.sqrt(puffs_array[i, 4])
         puffs_array[i, 3] *= 1.0 - puff_decay_rate * dt
         puffs_array[i, 4] += dt
@@ -49,7 +95,10 @@ def update_puffs_numba(
 
 @jit(nopython=True)
 def calculate_concentration_numba(agent_pos, agent_radius, puffs_array):
-    """Calculates concentration using a Top-Hat model."""
+    """
+    Calcula a concentração sensorial no ponto do veículo segundo o modelo Top-Hat
+    (concentração uniforme no interior do raio de cada pacote de odor).
+    """
     total_concentration = 0.0
     agent_x, agent_y = agent_pos[0], agent_pos[1]
 
@@ -75,7 +124,10 @@ def calculate_concentration_numba(agent_pos, agent_radius, puffs_array):
 
 @jit(nopython=True)
 def calculate_concentration_gaussian_numba(agent_pos, puffs_array):
-    """Calculates concentration using a Gaussian profile for each puff."""
+    """
+    Calcula a concentração local segundo um perfil Gaussiano contínuo,
+    em que cada pacote de odor atua como uma distribuição normal com desvio padrão sigma = r / 2.
+    """
     total_concentration = 0.0
     agent_x, agent_y = agent_pos[0], agent_pos[1]
     for i in range(puffs_array.shape[0]):
@@ -122,13 +174,35 @@ def plume_exists_at_x(x, plume, config):
     return False
 
 
+def get_plume_center_y(x, t, plume, config):
+    """
+    Retorna a linha central transversal (coordenada Y) da pluma na posição longitudinal x
+    e instante de simulação t.
+    - Para plumas sinusoidais: calcula analiticamente o eixo ondulatório instantâneo.
+    - Para plumas lineares ou OU: retorna a coordenada Y da fonte emissora.
+    """
+    src_x, src_y = config["source_position"]
+    is_sinusoid = config.get("meander_model", "ou").lower() in ["sum_of_sinusoids", "sinusoid", "sinusoidal"]
+    if is_sinusoid:
+        sin_cfg = config.get("sinusoid_meander_config", {})
+        amplitude = float(sin_cfg.get("amplitude", sin_cfg.get("v_var", 8.0)))
+        frequency = float(sin_cfg.get("frequency", 0.018))
+        ramp_L = 5.0
+        two_pi_f = 2.0 * np.pi * frequency
+        vx = config["mean_wind_velocity"][0] if abs(config["mean_wind_velocity"][0]) > 1e-4 else 0.4
+        dx = max(0.0, x - src_x)
+        ramp = np.tanh(dx / ramp_L)
+        return float(src_y + amplitude * ramp * np.sin(two_pi_f * (t - dx / vx)))
+    return float(src_y)
+
+
 # ======================================================================================
-# MEANDER MODEL DEFINITIONS
+# 2. MODELOS MATEMÁTICOS DE MEANDRO DA PLUMA
 # ======================================================================================
 
 
 class MeanderModel:
-    """Base class for meander models."""
+    """Classe base abstrata para modelos de meandro e flutuação transversal da pluma."""
 
     def __init__(self, main_config, model_config):
         self.main_config = main_config
@@ -139,6 +213,10 @@ class MeanderModel:
 
 
 class Linear_MeanderModel(MeanderModel):
+    """
+    Modelo de meandro linear (sem oscilação transversal).
+    A velocidade transversal vy é nula e a pluma alinha-se diretamente com o escoamento médio.
+    """
 
     def __init__(self, main_config, model_config):
         super().__init__(main_config, model_config)
@@ -149,7 +227,10 @@ class Linear_MeanderModel(MeanderModel):
 
 
 class OU_MeanderModel(MeanderModel):
-
+    """
+    Modelo de meandro baseado no processo estocástico de Ornstein-Uhlenbeck (OU).
+    Modela flutuações contínuas com reversão à média e dispersão browniana.
+    """
 
     def __init__(self, main_config, model_config):
         super().__init__(main_config, model_config)
@@ -160,6 +241,7 @@ class OU_MeanderModel(MeanderModel):
         self.ou_sigma = intensity
 
     def update(self, dt, current_time):
+        """Atualiza a velocidade transversal vy através da equação diferencial estocástica de OU."""
         if self.ou_theta > 0:
             drift = -self.ou_theta * self.meandering_vy * dt
             diffusion = self.ou_sigma * np.sqrt(dt) * np.random.randn()
@@ -168,7 +250,11 @@ class OU_MeanderModel(MeanderModel):
 
 
 class Sinusoid_MeanderModel(MeanderModel):
-
+    """
+    Modelo de meandro sinusoidal harmónico.
+    Produz uma oscilação ondulatória transversal periódica que simula esteiras
+    e correntes sinuosas típicas de escoamentos marinhos e fluviais.
+    """
 
     def __init__(self, main_config, model_config):
         super().__init__(main_config, model_config)
@@ -182,10 +268,8 @@ class Sinusoid_MeanderModel(MeanderModel):
 
         if drift_timescale > 0:
             self.drift_theta = 1.0 / drift_timescale
-            print(f"  > Drift correction ENABLED (timescale: {drift_timescale}s)")
         else:
             self.drift_theta = 0.0
-            print("  > Drift correction DISABLED.")
 
         wind_speed = np.linalg.norm(self.main_config["mean_wind_velocity"])
         if wind_speed < 1e-6:
@@ -211,20 +295,23 @@ class Sinusoid_MeanderModel(MeanderModel):
         self.phases = np.random.rand(self.num_harmonics) * 2 * np.pi
 
     def update(self, dt, current_time):
-        # Perfect, clean single sinusoid for a beautiful wave-like plume
-        amplitude = self.model_config.get("amplitude", 1.5)
-        frequency = self.model_config.get("frequency", 0.08)
+        """Calcula a velocidade transversal instantânea baseada na amplitude e frequência configuradas."""
+        amplitude = self.model_config.get("amplitude", self.model_config.get("v_var", 8.0))
+        wind_speed = np.linalg.norm(self.main_config.get("mean_wind_velocity", [0.4, 0.0]))
+        L = self.model_config.get("integral_length_scale_L", 22.0)
+        default_freq = (wind_speed / L) if L > 0 else 0.018
+        frequency = self.model_config.get("frequency", default_freq)
         self.meandering_vy = amplitude * np.sin(2 * np.pi * frequency * current_time)
         return self.meandering_vy
 
 
 # ======================================================================================
-# 3. CORE CLASS DEFINITIONS
+# 3. CLASSES PRINCIPAIS DO SISTEMA DE SIMULAÇÃO
 # ======================================================================================
 
 
 class DataLogger:
-    """Handles saving simulation data to an HDF5 file for a single experiment."""
+    """Gere o registo e exportação de dados temporais da simulação para ficheiros HDF5 (.h5)."""
 
     def __init__(self, config, experiment_num):
         self.save_path = config["save_path"]
@@ -246,6 +333,7 @@ class DataLogger:
         self.config = config
 
     def log_step(self, sim_time, agent_pos, concentration, agent_state, battery, custom_osl_data=None):
+        """Regista um passo temporal na memória interna para posterior gravação."""
         self.data_buffer["time"].append(sim_time)
         self.data_buffer["agent_position"].append(agent_pos)
         self.data_buffer["concentration"].append(concentration)
@@ -255,7 +343,7 @@ class DataLogger:
             self.data_buffer["custom_osl_data"].append(json.dumps(custom_osl_data))
 
     def save(self):
-        print(f"\nSaving data for experiment to {self.filename}...")
+        """Escreve todos os dados acumulados no ficheiro HDF5 estruturado."""
         with h5py.File(self.filename, "w") as f:
             for key, data in self.data_buffer.items():
                 if not data:
@@ -280,36 +368,36 @@ class DataLogger:
                     f.attrs[key] = value
                 except TypeError:
                     f.attrs[key] = str(value)
-        print("Save complete.")
 
 
 class FilamentPlume:
+    """
+    Modelo lagrangeano de dispersão de filamentos de pluma no meio fluido.
+    Gere a emissão periódica, expansão volumétrica, decaimento químico e
+    meandro transversal dos pacotes de odor (puffs).
+    """
 
     def __init__(self, config):
         self.config = config
         self.source_pos = np.array(config["source_position"])
 
-        # Static pre-allocated array initialization
-        # A estrutura das 5 colunas do puffs_array é:
-        # Coluna 0: Posição X (x)
-        # Coluna 1: Posição Y (y)
-        # Coluna 2: Raio do Puff (r)
-        # Coluna 3: Massa do Puff (mass) [0.0 se estiver inativo]
-        # Coluna 4: Idade do Puff (age) em segundos
+        # Inicialização do array estático pré-alocado para máxima performance:
+        # Coluna 0: Posição X em metros
+        # Coluna 1: Posição Y em metros
+        # Coluna 2: Raio do pacote (r) em metros
+        # Coluna 3: Massa ativa do pacote (0.0 se inativo)
+        # Coluna 4: Idade do pacote em segundos
         self.max_puffs = self.config.get("max_puffs", 2000)
         self.puffs_array = np.zeros((self.max_puffs, 5), dtype=np.float32)
         self.time_since_last_puff = 0.0
 
         model_name = self.config.get("meander_model", "ou").lower()
-        if model_name == "sum_of_sinusoids":
-            print("Using Sum of Sinusoids meander model.")
+        if model_name in ["sum_of_sinusoids", "sinusoid", "sinusoidal"]:
             model_config = self.config.get("sinusoid_meander_config", {})
             self.meander_generator = Sinusoid_MeanderModel(self.config, model_config)
         elif model_name == "linear":
-            print("Using Linear (no meander) plume model.")
             self.meander_generator = Linear_MeanderModel(self.config, {})
         else:
-            print("Using Ornstein-Uhlenbeck (OU) meander model.")
             model_config = self.config.get("ou_meander_config", {})
             self.meander_generator = OU_MeanderModel(self.config, model_config)
 
@@ -337,13 +425,7 @@ class FilamentPlume:
 
             if len(slots_to_use) > 0:
                 self.puffs_array[slots_to_use, 0] = self.source_pos[0]
-                # For the sum_of_sinusoids model, we set the initial vertical offset at release.
-                # This creates a perfect spatial sinusoidal plume wave trailing downwind.
-                if self.config.get("meander_model", "ou") == "sum_of_sinusoids":
-                    self.puffs_array[slots_to_use, 1] = self.source_pos[1] + meandering_vy
-                else:
-                    self.puffs_array[slots_to_use, 1] = self.source_pos[1]
-
+                self.puffs_array[slots_to_use, 1] = self.source_pos[1]
                 self.puffs_array[slots_to_use, 2] = 0.0
                 self.puffs_array[slots_to_use, 3] = self.config["initial_puff_mass"]
                 self.puffs_array[slots_to_use, 4] = 0.0
@@ -351,18 +433,39 @@ class FilamentPlume:
             self.time_since_last_puff = 0.0
 
         if self.puffs_array.shape[0] > 0:
+            is_sinusoid = self.config.get("meander_model", "ou").lower() in ["sum_of_sinusoids", "sinusoid", "sinusoidal"]
+            if is_sinusoid:
+                sin_cfg = self.config.get("sinusoid_meander_config", {})
+                amplitude = float(sin_cfg.get("amplitude", sin_cfg.get("v_var", 8.0)))
+                frequency = float(sin_cfg.get("frequency", 0.018))
+                expansion_rate = float(sin_cfg.get("puff_expansion_rate", self.config.get("puff_expansion_rate", 0.29)))
+                turbulence = float(sin_cfg.get("turbulence_intensity", self.config.get("turbulence_intensity", 0.18)))
 
-            meander_val = 0.0 if self.config.get("meander_model", "ou") == "sum_of_sinusoids" else meandering_vy
-            self.puffs_array = update_puffs_numba(
-                self.puffs_array,
-                dt,
-                np.array(self.config["mean_wind_velocity"]),
-                meander_val,
-                self.config["turbulence_intensity"],
-                self.config["puff_decay_rate"],
-                self.config.get("puff_expansion_rate", 0.2),
-                min_mass,
-            )
+                self.puffs_array = update_puffs_sinusoid_numba(
+                    self.puffs_array,
+                    dt,
+                    current_time,
+                    float(self.source_pos[0]),
+                    float(self.source_pos[1]),
+                    np.array(self.config["mean_wind_velocity"], dtype=np.float32),
+                    amplitude,
+                    frequency,
+                    turbulence,
+                    float(self.config["puff_decay_rate"]),
+                    expansion_rate,
+                    min_mass,
+                )
+            else:
+                self.puffs_array = update_puffs_numba(
+                    self.puffs_array,
+                    dt,
+                    np.array(self.config["mean_wind_velocity"]),
+                    meandering_vy,
+                    self.config["turbulence_intensity"],
+                    self.config["puff_decay_rate"],
+                    self.config.get("puff_expansion_rate", 0.25),
+                    min_mass,
+                )
             # Atualizar inatividade no próprio array (sem realocação de memória)
             dead_mask = (self.puffs_array[:, 3] <= min_mass) | (
                 self.puffs_array[:, 4] >= self.config["max_time"]
@@ -371,7 +474,11 @@ class FilamentPlume:
 
 
 class Agent:
-
+    """
+    Classe base para agentes de navegação autónoma subaquática (AUV).
+    Modela as propriedades cinemáticas, consumo de bateria sob esforço de corrente
+    e medições sensoriais de fluxo e concentração química.
+    """
 
     def __init__(self, config):
         self.config = config
@@ -385,18 +492,17 @@ class Agent:
         self.reset()
 
     def reset(self):
-        center = np.array(self.config["agent_start_region_center"])
-        radius = self.config["agent_start_region_radius"]
-        r = radius * np.sqrt(np.random.rand())
-        theta = 2 * np.pi * np.random.rand()
-        self.pos = center + np.array([r * np.cos(theta), r * np.sin(theta)])
+        """Reinicializa as variáveis de estado do veículo para um novo ensaio."""
+        start_y = float(np.random.uniform(10.0, 40.0))
+        self.config["agent_start_region_center"] = (90.0, start_y)
+        self.pos = np.array([90.0, start_y], dtype=np.float64)
         self.direction = np.array([1.0, 0.0])
         self.current_concentration = 0.0
         self.measured_flow_direction = np.array([1.0, 0.0])
         if hasattr(self, "internal_state"):
             self.internal_state = "casting"
 
-        self.state = "searching"
+        self.state = "waiting"
         self.first_detection_pos = None
         self.mission_complete = False
         self.circling_step = 0
@@ -406,9 +512,14 @@ class Agent:
         self.skirting_side_ida = None
         self.battery = self.battery_capacity
         self.return_waypoint_reached = False
+        self.low_battery_direct_return = False
         self.theta = 0.0
 
     def get_circling_target(self, dt):
+        """
+        Calcula o ponto-alvo para manobra de contorno circular suave em redor da fonte (360°),
+        antes de iniciar o estado de retorno à posição da primeira deteção.
+        """
         source_pos = np.array(self.config["source_position"])
         radius = self.config.get("agent_config", {}).get("success_distance", 2.0) * 1.0
         ida_side = self.skirting_side_ida if self.skirting_side_ida is not None else 1.0
@@ -423,12 +534,14 @@ class Agent:
             if self.circling_angle >= 3.0 * np.pi / 2.0:
                 self.state = "returning"
                 self.source_reached = False
+                self.theta = None
                 print(f"\n[Agent] Circling complete! State changed to RETURNING. Goal: {self.first_detection_pos}")
         else:
             self.circling_angle -= angular_speed * dt
             if self.circling_angle <= np.pi / 2.0:
                 self.state = "returning"
                 self.source_reached = False
+                self.theta = None
                 print(f"\n[Agent] Circling complete! State changed to RETURNING. Goal: {self.first_detection_pos}")
                 
         target = source_pos + np.array([radius * np.cos(self.circling_angle), radius * np.sin(self.circling_angle)])
@@ -440,10 +553,10 @@ class Agent:
 
         if isinstance(plume.meander_generator, OU_MeanderModel):
             vy = plume.meander_generator.meandering_vy
+            self.measured_flow_direction = mean_wind + np.array([0.0, vy])
         else:
-            vy = plume.meander_generator.meandering_vy
+            self.measured_flow_direction = mean_wind.copy()
 
-        self.measured_flow_direction = mean_wind + np.array([0.0, vy])
         return self.measured_flow_direction
 
     def measure_concentration(self, plume):
@@ -521,20 +634,26 @@ class SimpleUpwindAgent(Agent):
 
 
 class BioInspiredAgent(Agent):
-    """A more robust agent using decision hysteresis and an expanding cast search pattern."""
+    """
+    Agente com estratégia de busca bio-inspirada (Cast-and-Surge com movimento em traça).
+    Implementa histerese de decisão sensorial, busca transversal progressiva ao perder o sinal
+    e retorno de emergência à posição de partida se a bateria descer abaixo de 15%.
+    """
 
     def __init__(self, config):
         self.main_config = config
         super().__init__(config)
 
     def reset(self):
+        """Reinicializa as variáveis de navegação e controlo comportamental do agente."""
         super().reset()
         self.state, self.behavior, self.internal_state = "SEARCHING", "SEARCHING", "DECIDING"
         self.target_pos, self.cast_direction, self.search_direction = None, 1, 1
         self.consecutive_hits, self.consecutive_misses = 0, 0
-        self.current_cast_length = self.config.get("cast_length", 7.0)
+        self.current_cast_length = self.config.get("cast_length", 25.0)
 
     def _compute_zig_zag_target(self, length, angle_deg, direction_sign):
+        """Calcula o vetor de deslocamento em ziguezague relativamente à corrente contra o vento."""
         flow_norm = np.linalg.norm(self.measured_flow_direction)
         if flow_norm < 1e-6:
             return self.pos
@@ -556,7 +675,7 @@ class BioInspiredAgent(Agent):
             self.config["search_angle"],
             self.search_direction,
         )
-        if not (0 < potential_target[1] < self.main_config["world_height"]):
+        if not (2.0 < potential_target[1] < self.main_config["world_height"] - 2.0):
             print("  > Search target out of bounds. Inverting direction.")
             self.search_direction *= -1
             self.target_pos = self._compute_zig_zag_target(
@@ -566,6 +685,9 @@ class BioInspiredAgent(Agent):
             )
         else:
             self.target_pos = potential_target
+        if self.target_pos is not None:
+            self.target_pos[0] = np.clip(self.target_pos[0], 2.0, self.main_config["world_width"] - 2.0)
+            self.target_pos[1] = np.clip(self.target_pos[1], 2.0, self.main_config["world_height"] - 2.0)
         self.internal_state = "MOVING_TO_TARGET"
 
     def _set_cast_target(self):
@@ -576,7 +698,7 @@ class BioInspiredAgent(Agent):
         potential_target = self._compute_zig_zag_target(
             self.current_cast_length, self.config["cast_angle"], self.cast_direction
         )
-        if not (0 < potential_target[1] < self.main_config["world_height"]):
+        if not (2.0 < potential_target[1] < self.main_config["world_height"] - 2.0):
             print("  > Cast target out of bounds. Inverting direction.")
             self.cast_direction *= -1
             self.target_pos = self._compute_zig_zag_target(
@@ -584,12 +706,15 @@ class BioInspiredAgent(Agent):
             )
         else:
             self.target_pos = potential_target
+        if self.target_pos is not None:
+            self.target_pos[0] = np.clip(self.target_pos[0], 2.0, self.main_config["world_width"] - 2.0)
+            self.target_pos[1] = np.clip(self.target_pos[1], 2.0, self.main_config["world_height"] - 2.0)
         self.internal_state = "MOVING_TO_TARGET"
 
     def _set_surge_target(self):
         print("BEHAVIOR: Surging")
         self.behavior = "SURGING"
-        self.current_cast_length = self.config.get("cast_length", 7.0)
+        self.current_cast_length = self.config.get("cast_length", 25.0)
         flow_norm = np.linalg.norm(self.measured_flow_direction)
         if flow_norm > 1e-6:
             upwind_dir = -self.measured_flow_direction / flow_norm
@@ -653,9 +778,14 @@ class BioInspiredAgent(Agent):
                         self.cast_direction *= -1
                     self._set_cast_target()
         elif self.internal_state == "MOVING_TO_TARGET":
+            hit_wall = (
+                self.pos[1] <= 2.2 or self.pos[1] >= self.main_config["world_height"] - 2.2 or
+                self.pos[0] <= 2.2 or self.pos[0] >= self.main_config["world_width"] - 2.2
+            )
             if (
                 self.target_pos is None
-                or np.linalg.norm(self.pos - self.target_pos) < 0.5
+                or np.linalg.norm(self.pos - self.target_pos) < 0.8
+                or hit_wall
             ):
                 self.internal_state, self.target_pos = "DECIDING", None
 
@@ -669,21 +799,27 @@ class BioInspiredAgent(Agent):
 
 
 class PlumeRLWrapper(gym.Env):
+    """
+    Ambiente de simulação compatível com a API Gymnasium para treino por Reforço.
+    Encapsula a física da dispersão lagrangeana, dinâmica de bateria do AUV e
+    calcula as funções de recompensa para orientação e localização da fonte.
+    """
 
     metadata = {"render_modes": ["human", "rgb_array"]}
 
     def __init__(self, config):
         """
-        Initialize environment
-
-        Args:
-            config: Configuration dictionary with simulator parameters
+        Inicializa o ambiente de treino, define os espaços de ação discreta (4 direções)
+        e os espaços de observação contínua normalizados (7 dimensões).
         """
         super().__init__()
         self.config = config
 
+        # Ações discretas: 0=Cima, 1=Baixo, 2=Esquerda, 3=Direita
         self.action_space = spaces.Discrete(4)
 
+        # Vetor de observação com 7 variáveis normalizadas:
+        # [x, y, concentração, fluxo_x, fluxo_y, estado_missão, nível_bateria]
         self.observation_space = spaces.Box(
             low=np.array([0, 0, 0, -1, -1, 0, 0], dtype=np.float32),
             high=np.array([1, 1, 1, 1, 1, 1, 1], dtype=np.float32),
@@ -703,14 +839,14 @@ class PlumeRLWrapper(gym.Env):
             "battery_depleted_penalty": -200.0,
         }
 
-        self.conc_max = 10.0  # Expected maximum concentration
-        self.flow_max = 5.0  # Expected maximum flow magnitude
+        self.conc_max = 10.0
+        self.flow_max = 5.0
 
         self.battery_capacity = self.config.get("battery_capacity", 250.0)
         self.battery = self.battery_capacity
         self.last_drain = 0.0
 
-        # State tracking
+        # Rastreio de variáveis de estado
         self.plume = None
         self.pos = None
         self.time = 0.0
@@ -722,12 +858,12 @@ class PlumeRLWrapper(gym.Env):
         self.current_conc = 0.0
 
     def _validate_config(self):
-        """Validate configuration parameters"""
-        assert self.config["world_width"] > 0, "world_width must be positive"
-        assert self.config["world_height"] > 0, "world_height must be positive"
-        assert self.config["dt"] > 0 and self.config["dt"] < 1, "dt must be in (0, 1)"
+        """Valida a consistência dos parâmetros físicos configurados no ambiente."""
+        assert self.config["world_width"] > 0, "world_width deve ser positivo"
+        assert self.config["world_height"] > 0, "world_height deve ser positivo"
+        assert self.config["dt"] > 0 and self.config["dt"] < 1, "dt deve situar-se no intervalo (0, 1)"
         assert self.config["agent_config"]["agent_speed"] > 0, (
-            "agent_speed must be positive"
+            "agent_speed deve ser positivo"
         )
         assert self.config["emission_rate"] > 0, "emission_rate must be positive"
         assert self.config["max_time"] > 0, "max_time must be positive"
@@ -741,24 +877,14 @@ class PlumeRLWrapper(gym.Env):
         # Validate config
         self._validate_config()
 
-        min_margin = 5.0
-
-        self.config["agent_start_region_center"] = (
-            np.random.uniform(
-                self.config["world_width"] * 0.6,
-                self.config["world_width"] - min_margin,
-            ),
-            np.random.uniform(min_margin, self.config["world_height"] - min_margin),
-        )
+        start_y = float(np.random.uniform(10.0, 40.0))
+        self.config["agent_start_region_center"] = (90.0, start_y)
 
         self.plume = FilamentPlume(self.config)
         self.time = 0.0
 
-        # Initialize agent position
-        c = np.array(self.config["agent_start_region_center"])
-        r = self.config["agent_start_region_radius"] * np.sqrt(np.random.rand())
-        theta = 2 * np.pi * np.random.rand()
-        self.pos = c + np.array([r * np.cos(theta), r * np.sin(theta)])
+        # Initialize agent position: x = 90, y random between 10 and 40
+        self.pos = np.array([90.0, start_y], dtype=np.float64)
         self.prev_pos = self.pos.copy()
 
         # Reset tracking
@@ -780,10 +906,9 @@ class PlumeRLWrapper(gym.Env):
         self.battery = self.battery_capacity
         self.last_drain = 0.0
 
-        # Stabilize plume
-        for _ in range(
-            int(self.config["plume_stabilization_time"] / self.config["dt"])
-        ):
+        # Esperar 8 segundos no início de cada episódio antes de iniciar o movimento
+        initial_wait_time = self.config.get("agent_initial_wait_time", 8.0)
+        for _ in range(int(initial_wait_time / self.config["dt"])):
             self.plume.update(self.config["dt"], self.time)
             self.time += self.config["dt"]
 
@@ -850,7 +975,8 @@ class PlumeRLWrapper(gym.Env):
                 total_dist = dist_to_source + circling_dist + dist_source_to_start
                 est_time = total_dist / speed
                 est_battery_needed = est_time * base_decay * 1.3
-                if self.battery < est_battery_needed:
+                battery_pct = (self.battery / self.battery_capacity) * 100.0
+                if self.battery < est_battery_needed or battery_pct <= 15.0:
                     self.state = "returning"
                     self.prev_dist_to_detection = np.linalg.norm(self.pos - self.first_detection_pos) if self.first_detection_pos is not None else 0.0
 
@@ -1093,13 +1219,17 @@ class QLearningSimAgent(Agent):
     def run_search_algorithm(self, dt):
         if self.state == "searching":
             # Deterministic casting/zig-zag behavior against the wind
-            agent_speed = self.config.get("agent_config", {}).get("agent_speed", 3.0)
-            cast_angle_deg = self.config.get("agent_config", {}).get("cast_angle", 60.0)
-            cast_length = self.config.get("agent_config", {}).get("cast_length", 6.0)
+            agent_speed = getattr(self, "speed", self.config.get("agent_config", {}).get("agent_speed", 2.4))
+            cast_angle_deg = self.config.get("agent_config", {}).get("cast_angle", 75.0)
+            cast_length = self.config.get("agent_config", {}).get("cast_length", 26.0)
 
             if not hasattr(self, "search_zig_zag_dir"):
                 self.search_zig_zag_dir = 1 if np.random.rand() > 0.5 else -1
                 self.search_steps_in_dir = 0.0
+
+            world_w = self.config.get("world_width", 100.0)
+            world_h = self.config.get("world_height", 50.0)
+            margin = 2.0
 
             flow_norm = np.linalg.norm(self.measured_flow_direction)
             if flow_norm > 1e-6:
@@ -1107,39 +1237,54 @@ class QLearningSimAgent(Agent):
             else:
                 upwind_dir = np.array([-1.0, 0.0])  # default to Left (against typical wind)
 
-            # Rotate upwind direction by cast_angle in the current direction sign
-            angle_rad = np.deg2rad(cast_angle_deg * self.search_zig_zag_dir)
-            rot_matrix = np.array([
-                [np.cos(angle_rad), -np.sin(angle_rad)],
-                [np.sin(angle_rad), np.cos(angle_rad)]
-            ])
-            move_dir = rot_matrix @ upwind_dir
-
-            # Step distance
-            step_dist = agent_speed * dt
-            target_pos = self.pos + move_dir * step_dist
-
-            # Update distance in current direction
-            self.search_steps_in_dir += step_dist
-
-            # Check boundaries (top and bottom with 2.0 margin)
-            world_h = self.config["world_height"]
-            margin = 2.0
-            hit_wall = (target_pos[1] < margin and self.search_zig_zag_dir == -1) or \
-                       (target_pos[1] > world_h - margin and self.search_zig_zag_dir == 1)
-
-            if self.search_steps_in_dir >= cast_length or hit_wall:
-                self.search_zig_zag_dir *= -1
-                self.search_steps_in_dir = 0.0
-
-                # Recompute target_pos in the new direction
-                angle_rad = np.deg2rad(cast_angle_deg * self.search_zig_zag_dir)
+            def get_cast_dir(dir_sign):
+                angle_rad = np.deg2rad(cast_angle_deg * dir_sign)
                 rot_matrix = np.array([
                     [np.cos(angle_rad), -np.sin(angle_rad)],
-                    [np.sin(angle_rad), np.cos(angle_rad)]
+                    [np.sin(angle_rad), np.cos(angle_rad)],
                 ])
-                move_dir = rot_matrix @ upwind_dir
-                target_pos = self.pos + move_dir * step_dist
+                md = rot_matrix @ upwind_dir
+                md_norm = np.linalg.norm(md)
+                return md / md_norm if md_norm > 1e-6 else np.array([-1.0, 0.0])
+
+            move_dir = get_cast_dir(self.search_zig_zag_dir)
+            step_dist = agent_speed * dt
+            next_pos = self.pos + move_dir * step_dist
+
+            # Detect hitting the top or bottom boundaries
+            hit_bottom = (next_pos[1] <= margin or self.pos[1] <= margin) and move_dir[1] < 0
+            hit_top = (next_pos[1] >= world_h - margin or self.pos[1] >= world_h - margin) and move_dir[1] > 0
+
+            if hit_bottom:
+                # Bounce upwards into the arena
+                dir_up = -1 if get_cast_dir(-1)[1] > 0 else 1
+                self.search_zig_zag_dir = dir_up
+                self.search_steps_in_dir = 0.0
+                move_dir = get_cast_dir(self.search_zig_zag_dir)
+            elif hit_top:
+                # Bounce downwards into the arena
+                dir_down = 1 if get_cast_dir(1)[1] < 0 else -1
+                self.search_zig_zag_dir = dir_down
+                self.search_steps_in_dir = 0.0
+                move_dir = get_cast_dir(self.search_zig_zag_dir)
+            elif self.search_steps_in_dir >= cast_length:
+                self.search_zig_zag_dir *= -1
+                self.search_steps_in_dir = 0.0
+                move_dir = get_cast_dir(self.search_zig_zag_dir)
+
+            # Prevent getting pinned at the left (x <= margin) or right (x >= world_w - margin) boundaries
+            next_pos = self.pos + move_dir * step_dist
+            if (next_pos[0] <= margin or self.pos[0] <= margin) and move_dir[0] < 0:
+                move_dir[0] = abs(move_dir[0]) * 0.2
+                move_dir /= np.linalg.norm(move_dir)
+            elif (next_pos[0] >= world_w - margin or self.pos[0] >= world_w - margin) and move_dir[0] > 0:
+                move_dir[0] = -abs(move_dir[0]) * 0.2
+                move_dir /= np.linalg.norm(move_dir)
+
+            self.search_steps_in_dir += step_dist
+            target_pos = self.pos + move_dir * step_dist
+            target_pos[0] = np.clip(target_pos[0], margin, world_w - margin)
+            target_pos[1] = np.clip(target_pos[1], margin, world_h - margin)
 
             return target_pos, {"action": f"searching_zigzag_{self.search_zig_zag_dir}"}
 
@@ -1153,6 +1298,15 @@ class QLearningSimAgent(Agent):
         if self.state == "returning" and is_4tuple:
             if self.first_detection_pos is None:
                 return self.pos, {"action": "returning_idle"}
+
+            battery_pct = (self.battery / self.battery_capacity) * 100.0
+            if battery_pct <= 15.0 or getattr(self, "low_battery_direct_return", False):
+                self.low_battery_direct_return = True
+                goal_vec = self.first_detection_pos - self.pos
+                goal_norm = np.linalg.norm(goal_vec)
+                target_pos = self.pos + (goal_vec / goal_norm) * self.speed * dt if goal_norm > 1e-6 else self.pos
+                return target_pos, {"action": "returning_direct_low_battery"}
+
             center_y = self.config["world_height"] / 2.0
             skirting_side_ida = 1 if self.first_detection_pos[1] >= center_y else -1
 
@@ -1276,18 +1430,23 @@ AGENT_REGISTRY = {
     "QLearningAgent": QLearningSimAgent,
 }
 # ======================================================================================
-# 4. SIMULATOR (ORCHESTRATOR)
+# 4. SIMULADOR GRÁFICO 2D E ORQUESTRADOR DE ENSAIOS
 # ======================================================================================
 
 
 class Simulator:
-    """Main orchestrator for running experiments."""
+    """
+    Orquestrador principal da simulação física e visualização gráfica em tempo real.
+    Gere o ciclo de vida dos ensaios, a integração temporal do fluido, os sensores
+    do veículo autónomo e a renderização do painel HUD marinho em Pygame / OpenCV.
+    """
 
     def __init__(self, config):
+        """Inicializa o simulador, instancia o agente configurado e prepara a janela visual."""
         self.config = config
         agent_class_name = config["agent_class"]
         if agent_class_name not in AGENT_REGISTRY:
-            raise ValueError(f"Agent class '{agent_class_name}' not found.")
+            raise ValueError(f"Classe de agente '{agent_class_name}' não registada.")
         agent_full_config = {**config, **config.get("agent_config", {})}
         self.agent = AGENT_REGISTRY[agent_class_name](agent_full_config)
         self.plume, self.logger = None, None
@@ -1297,25 +1456,13 @@ class Simulator:
             self._init_visualization()
 
     def reset_experiment(self):
-        print(
-            "-" * 40
-            + f"\nStarting Experiment {self.current_experiment + 1}/{self.config['num_experiments']}"
-        )
-
-        min_margin = 5.0
-        self.config["agent_start_region_center"] = (
-            np.random.uniform(
-                self.config["world_width"] * 0.6,
-                self.config["world_width"] - min_margin,
-            ),
-            np.random.uniform(min_margin, self.config["world_height"] - min_margin),
-        )
-
+        """Reinicializa as variáveis de ambiente, posicionamento e registo para um novo ensaio."""
         self.logger = DataLogger(self.config, self.current_experiment)
         self.simulation_time = 0.0
         self.plume = FilamentPlume(self.config)
         self.agent.plume = self.plume
         self.agent.reset()
+        self.config["agent_start_region_center"] = self.agent.config["agent_start_region_center"]
 
     def step(self):
         dt = self.config["dt"]
@@ -1327,76 +1474,122 @@ class Simulator:
         self.agent.measure_concentration(self.plume)
         self.agent.measure_flow(self.plume)
 
+        # Esperar 8 segundos no início de cada episódio antes de iniciar o movimento
+        initial_wait_time = self.config.get("agent_initial_wait_time", 8.0)
+        if self.simulation_time < initial_wait_time:
+            self.agent.state = "waiting"
+            custom_data = {"state": "waiting"}
+            self.logger.log_step(
+                self.simulation_time,
+                self.agent.pos.copy(),
+                self.agent.current_concentration,
+                self.agent.state,
+                self.agent.battery,
+                custom_data,
+            )
+            self.simulation_time += dt
+            return False
+        elif self.agent.state == "waiting":
+            self.agent.state = "searching"
+
         conc_thresh = self.config["agent_config"].get("agent_concentration_threshold", 1.0)
-        source_pos = self.plume.source_pos
+        source_pos = np.array(self.config["source_position"])
         dist_to_source = np.linalg.norm(self.agent.pos - source_pos)
         success_distance = self.config["agent_config"].get("success_distance", 2.0)
 
+        # 1. State transition from searching -> following_boundary
         if self.agent.state == "searching":
             if self.agent.current_concentration > conc_thresh:
                 self.agent.state = "following_boundary"
                 self.agent.first_detection_pos = self.agent.pos.copy()
-                print(f"\n[Simulator] Plume DETECTED at {self.agent.first_detection_pos}! Following boundary to source.")
+                self.agent.theta = None  # Reset heading for following_boundary
+                local_center_y = get_plume_center_y(self.agent.pos[0], self.simulation_time, self.plume, self.config)
+                self.agent.skirting_side_ida = 1.0 if self.agent.pos[1] >= local_center_y else -1.0
+                side_str = "TOP" if self.agent.skirting_side_ida == 1.0 else "BOTTOM"
+                print(f"\n[Simulator] Plume DETECTED at {self.agent.first_detection_pos}! Side: {side_str}. Following boundary to source.")
 
+        # 2. Check source arrival when following boundary
         elif self.agent.state == "following_boundary":
             if dist_to_source < success_distance and not self.agent.source_reached:
                 self.agent.source_reached = True
                 self.agent.circling_step = 0
                 print(f"\n[Simulator] Source REACHED! Starting circling/contouring maneuver.")
-            
-            if not self.agent.source_reached:
-                # Early safety abort check
-                speed = self.agent.speed
-                dist_source_to_start = np.linalg.norm(source_pos - self.agent.first_detection_pos) if self.agent.first_detection_pos is not None else 0.0
-                radius = success_distance * 1.0
-                circling_dist = np.pi * radius
-                total_dist = dist_to_source + circling_dist + dist_source_to_start
-                est_time = total_dist / speed
-                base_decay = self.agent.battery_base_decay
-                est_battery_needed = est_time * base_decay * 1.3
-                if self.agent.battery < est_battery_needed:
-                    self.agent.state = "returning"
-                    self.agent.prev_dist_to_detection = np.linalg.norm(self.agent.pos - self.agent.first_detection_pos) if self.agent.first_detection_pos is not None else 0.0
-                    print(f"\n[Simulator] Low battery safety trigger! Remaining: {self.agent.battery:.1f}, Needed: {est_battery_needed:.1f}. Aborting and returning early!")
 
+        # 3. Check mission completion when returning normally
         elif self.agent.state == "returning":
-            dist_to_detection = np.linalg.norm(self.agent.pos - self.agent.first_detection_pos)
-            if dist_to_detection < success_distance:
-                self.agent.mission_complete = True
-                print(f"\n[Simulator] Mission complete! Returned to detection point at {self.agent.pos}.")
+            if self.agent.first_detection_pos is not None:
+                dist_to_detection = np.linalg.norm(self.agent.pos - self.agent.first_detection_pos)
+                if dist_to_detection < success_distance:
+                    self.agent.mission_complete = True
+                    print(f"\n[Simulator] Mission complete! Returned to detection point at {self.agent.pos}.")
 
         old_pos = self.agent.pos.copy()
 
-        if self.agent.state == "following_boundary":
+        # --- LOW BATTERY SAFETY CHECK (< 15%) FOR FOLLOWING_BOUNDARY AND RETURNING ---
+        battery_pct = (self.agent.battery / self.agent.battery_capacity) * 100.0
+        is_low_battery = (battery_pct <= 15.0) or getattr(self.agent, "low_battery_direct_return", False)
+
+        if self.agent.state in ["following_boundary", "returning"] and self.agent.first_detection_pos is not None and is_low_battery:
+            if not getattr(self.agent, "low_battery_direct_return", False):
+                self.agent.low_battery_direct_return = True
+                self.agent.state = "returning"
+                print(f"\n[Simulator] Low battery safety trigger! Bateria <= 15% ({battery_pct:.1f}%). Retornando DIRETAMENTE ao ponto de deteção {self.agent.first_detection_pos}!")
+
+            dist_to_detection = np.linalg.norm(self.agent.pos - self.agent.first_detection_pos)
+            if dist_to_detection < success_distance:
+                self.agent.mission_complete = True
+                print(f"\n[Simulator] Mission complete! Retornou diretamente ao ponto de deteção {self.agent.pos} com bateria baixa ({battery_pct:.1f}%).")
+                custom_data = {"state": "returning_direct_low_battery_complete", "battery_pct": battery_pct}
+            else:
+                goal_vec = self.agent.first_detection_pos - self.agent.pos
+                goal_norm = np.linalg.norm(goal_vec)
+                target_pos = self.agent.pos + (goal_vec / goal_norm) * self.agent.speed * dt if goal_norm > 1e-6 else self.agent.pos
+                custom_data = {"state": "returning_direct_low_battery", "battery_pct": battery_pct}
+                self.agent.move(target_pos, dt)
+
+        elif self.agent.state == "following_boundary":
             if self.agent.source_reached:
                 target_pos = self.agent.get_circling_target(dt)
                 custom_data = {"state": "circling_source", "step": self.agent.circling_step}
                 self.agent.move(target_pos, dt)
             else:
-                # Skirt the plume on the way to the source (Searching for Origin) for ALL agents!
+                local_center_y = get_plume_center_y(self.agent.pos[0], self.simulation_time, self.plume, self.config)
+                if self.agent.skirting_side_ida is None:
+                    self.agent.skirting_side_ida = 1.0 if self.agent.pos[1] >= local_center_y else -1.0
+                side = self.agent.skirting_side_ida
+
+                # Initialize theta if not present or None
+                if not hasattr(self.agent, 'theta') or self.agent.theta is None or self.agent.theta == 0.0:
+                    self.agent.theta = np.pi - (np.pi / 4.0 * side)
+
+                # Dynamic steering logic based on concentration (mesma forma do estado returning)
+                omega = 2.4  # turning rate in rad/s, responsive to sinusoidal boundary changes
                 if self.agent.current_concentration > conc_thresh:
-                    # We are inside the plume: move crosswind to exit it
-                    center_y = self.config["world_height"] / 2.0
-                    side = 1.0 if self.agent.pos[1] >= center_y else -1.0
-                    
-                    # Record the side we used during the upwind trip!
-                    if self.agent.skirting_side_ida is None:
-                        self.agent.skirting_side_ida = side
-                    
-                    skirt_vec = np.array([0.0, side])
-                    target_pos = self.agent.pos + skirt_vec * self.agent.speed * dt
-                    custom_data = {"state": "following_skirting_crosswind"}
+                    # Inside plume: turn away from plume interior
+                    if side == 1.0:
+                        self.agent.theta -= omega * dt
+                    else:
+                        self.agent.theta += omega * dt
                 else:
-                    # Outside or on the boundary: move towards the source
-                    goal_vec = source_pos - self.agent.pos
-                    goal_norm = np.linalg.norm(goal_vec)
-                    target_pos = self.agent.pos + (goal_vec / goal_norm) * self.agent.speed * dt if goal_norm > 1e-6 else self.agent.pos
-                    custom_data = {"state": "following_skirting_upwind"}
+                    # Outside plume: turn towards plume interior
+                    if side == 1.0:
+                        self.agent.theta += omega * dt
+                    else:
+                        self.agent.theta -= omega * dt
+
+                # Symmetric clip around upwind direction (pi)
+                # Allows steering up to 75 deg (5*pi/12) up or down, hugging sinusoidal wave peaks and troughs
+                theta_max = 5.0 * np.pi / 12.0
+                self.agent.theta = np.clip(self.agent.theta, np.pi - theta_max, np.pi + theta_max)
+
+                target_pos = self.agent.pos + np.array([np.cos(self.agent.theta), np.sin(self.agent.theta)]) * self.agent.speed * dt
+                custom_data = {"state": "following_boundary_steering", "theta": self.agent.theta}
                 self.agent.move(target_pos, dt)
+
         elif self.agent.state == "returning":
-            center_y = self.config["world_height"] / 2.0
             opposite_side = -self.agent.skirting_side_ida if self.agent.skirting_side_ida is not None else -1.0
-            on_returning_side = (self.agent.pos[1] < center_y) if opposite_side == -1.0 else (self.agent.pos[1] >= center_y)
+            local_center_y = get_plume_center_y(self.agent.pos[0], self.simulation_time, self.plume, self.config)
+            on_returning_side = (self.agent.pos[1] < local_center_y) if opposite_side == -1.0 else (self.agent.pos[1] >= local_center_y)
 
             # Check if we reached the X coordinate of detection point after the contour has been completed
             reached_detection_x = False
@@ -1416,7 +1609,7 @@ class Simulator:
                     self.agent.theta = -np.pi / 4.0 if opposite_side == -1.0 else np.pi / 4.0
 
                 # Dynamic steering logic based on concentration
-                omega = 1.8  # turning rate in rad/s
+                omega = 2.4  # turning rate in rad/s
                 if self.agent.current_concentration > conc_thresh:
                     # Inside: turn away from center
                     if opposite_side == -1.0:
@@ -1442,7 +1635,8 @@ class Simulator:
                 # Clip theta depending on returning phase to follow silhouette dynamically
                 if not self.agent.return_waypoint_reached:
                     # Phase 1: downwind boundary following (limit heading to downwind directions)
-                    self.agent.theta = np.clip(self.agent.theta, -np.pi/3, np.pi/3)
+                    theta_max_ret = 5.0 * np.pi / 12.0
+                    self.agent.theta = np.clip(self.agent.theta, -theta_max_ret, theta_max_ret)
                 else:
                     # Phase 2: crossing the end or returning upwind
                     if on_returning_side:
@@ -1677,8 +1871,9 @@ class Simulator:
         return canvas
 
     def _draw(self):
-        # 1. Create a blank canvas
-        canvas = np.zeros((self.viz_h, self.viz_w, 3), dtype=np.uint8)
+        # 1. Create a canvas with marine blue background
+        marine_bg_color = (110, 55, 20)  # BGR: tom de azul marinho
+        canvas = np.full((self.viz_h, self.viz_w, 3), marine_bg_color, dtype=np.uint8)
 
         # Draw axes onto the canvas first
         canvas = self._draw_axes(canvas)
@@ -1765,31 +1960,34 @@ class Simulator:
         hz = 1.0 / self.loop_time_ema if self.loop_time_ema > 0 else 0.0
         flow_vec = self.agent.measured_flow_direction
         state_str = self.agent.state.upper()
+        if getattr(self.agent, "low_battery_direct_return", False):
+            state_str = "RETURNING (LOW BAT <15%)"
         info_left = f"Time: {self.simulation_time:.1f}s | State: {state_str} | Conc: {self.agent.current_concentration:.2f} | Bat: {self.agent.battery:.1f}/{self.agent.battery_capacity:.1f}"
         info_right = f"Agent Pos: ({self.agent.pos[0]:.1f}, {self.agent.pos[1]:.1f})"
+        hud_color = (0, 255, 255)  # Amarelo de alto contraste sobre o fundo marinho
 
-        # This line is correct
         cv2.putText(
             canvas,
             info_left,
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale,
-            (255, 255, 255),
+            hud_color,
             1,
+            cv2.LINE_AA,
         )
 
         t_s_r = cv2.getTextSize(info_right, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)[0]
 
-        # The color tuple (255, 255, 255) and thickness integer (1) are now in the correct order.
         cv2.putText(
             canvas,
             info_right,
             (self.viz_w - t_s_r[0] - 10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale,
-            (255, 255, 255),
+            hud_color,
             1,
+            cv2.LINE_AA,
         )
 
         # 6. Display
@@ -1831,8 +2029,9 @@ if __name__ == "__main__":
         "battery_min_decay": 0.1,
         "concentration_model": "gaussian",
         "num_experiments": 10,
-        "plume_stabilization_time": 1.0,
-        "agent_start_region_center": (60.0, 25.0),
+        "plume_stabilization_time": 0.0,
+        "agent_initial_wait_time": 8.0,
+        "agent_start_region_center": (90.0, 25.0),
         "agent_start_region_radius": 2.0,
         # --- MEANDER MODEL CONFIGURATION ---
         "meander_model": "OU",
@@ -1866,9 +2065,9 @@ if __name__ == "__main__":
             "success_distance": 2.0,
             "agent_concentration_threshold": 1.0,
             "surge_length": 4.0,
-            "cast_length": 6.0,
-            "cast_angle": 60.0,
-            "search_length": 8.0,
+            "cast_length": 25.0,
+            "cast_angle": 75.0,
+            "search_length": 25.0,
             "search_angle": 75.0,
             "cast_length_increase_factor": 0.1,
             "confirmation_steps": 3,
@@ -1892,292 +2091,299 @@ if __name__ == "__main__":
 
     pasta_modelos = "modelos"
     os.makedirs(pasta_modelos, exist_ok=True)
-    modelos = glob.glob(os.path.join(pasta_modelos, "qlearning_plume_*.pkl"))
+    modelos = glob.glob(os.path.join(pasta_modelos, "*.pkl"))
     modelos.sort(key=os.path.getmtime, reverse=True)
     nomes_modelos = [os.path.basename(m) for m in modelos]
 
     escolhas = {
-
             "acao": None,
-
             "tipo_treino": "novo",
-
             "modelo_alvo": None,
-
+            "nome_guardar": None,
             "episodios": 3000,
-
     }
-        # --- INÍCIO DA INTERFACE GRÁFICA ---
+        # --- INÍCIO DA INTERFACE GRÁFICA (TEMA CLARO E PROFISSIONAL) ---
     root = tk.Tk()
+    root.title("Lançador - Simulador de Pluma & RL")
+    root.geometry("520x560")
+    root.minsize(480, 520)
 
-    root.title("Lançador - Simulador de Pluma")
+    # Paleta de Cores Clara
+    BG_MAIN = "#f1f5f9"
+    BG_CARD = "#ffffff"
+    BORDER_COLOR = "#cbd5e1"
+    TEXT_DARK = "#0f172a"
+    TEXT_MUTED = "#64748b"
+    PRIMARY_COLOR = "#0284c7"
 
-    root.geometry("480x480")
+    root.configure(bg=BG_MAIN)
+    root.option_add("*TCombobox*Listbox.background", "#ffffff")
+    root.option_add("*TCombobox*Listbox.foreground", "#0f172a")
+    root.option_add("*TCombobox*Listbox.selectBackground", PRIMARY_COLOR)
+    root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
 
     style = ttk.Style(root)
-
     style.theme_use("clam")
 
+    # Configurações do TTK para Tema Claro
+    style.configure(".", background=BG_MAIN, foreground=TEXT_DARK)
+    style.configure("TFrame", background=BG_MAIN)
+    style.configure("Card.TLabelframe", background=BG_CARD, bordercolor=BORDER_COLOR)
+    style.configure(
+        "Card.TLabelframe.Label",
+        background=BG_CARD,
+        foreground=TEXT_DARK,
+        font=("Segoe UI", 10, "bold"),
+    )
+    style.configure("TLabel", background=BG_CARD, foreground=TEXT_DARK, font=("Segoe UI", 9))
+    style.configure("Muted.TLabel", background=BG_CARD, foreground=TEXT_MUTED, font=("Segoe UI", 8))
+    style.configure("TRadiobutton", background=BG_CARD, foreground=TEXT_DARK, font=("Segoe UI", 9))
+    style.configure("TEntry", fieldbackground="#ffffff", foreground=TEXT_DARK, insertcolor=TEXT_DARK)
+    style.map("TEntry", fieldbackground=[("!disabled", "#ffffff"), ("disabled", "#f1f5f9")], foreground=[("!disabled", TEXT_DARK), ("disabled", TEXT_MUTED)])
+    style.configure("TCombobox", fieldbackground="#ffffff", foreground=TEXT_DARK, background="#ffffff")
+    style.map("TCombobox", fieldbackground=[("readonly", "#ffffff"), ("!disabled", "#ffffff")], foreground=[("readonly", TEXT_DARK), ("!disabled", TEXT_DARK)])
 
+    style.configure(
+        "Action.TButton",
+        background=PRIMARY_COLOR,
+        foreground="#ffffff",
+        font=("Segoe UI", 10, "bold"),
+        padding=8,
+        borderwidth=0,
+    )
+    style.map("Action.TButton", background=[("active", "#0369a1")])
 
-        # Variáveis do Tkinter
-
+    # Variáveis do Tkinter
     var_acao = tk.StringVar(value="treinar")
-
     var_tipo_treino = tk.StringVar(value="novo")
-
     var_episodios = tk.StringVar(value="3000")
-
+    var_nome_novo = tk.StringVar(value="")
     var_modelo = tk.StringVar()
-
     var_modelo_simular = tk.StringVar()
 
-
-
     if nomes_modelos:
-
         var_modelo.set(nomes_modelos[0])
-
         var_modelo_simular.set(nomes_modelos[0])
 
-
-
     def atualizar_interface(*args):
-
         """Ativa/Desativa/Mostra os frames dependendo da opção principal escolhida"""
-
         frame_treino.pack_forget()
-
         frame_simular.pack_forget()
-
         frame_dashboard.pack_forget()
 
-
-
         if var_acao.get() == "treinar":
-
-            frame_treino.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
+            frame_treino.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
             if var_tipo_treino.get() == "continuar":
-
                 combo_modelo_treino.config(state="readonly")
-
+                entry_nome_novo.config(state="disabled")
             else:
-
                 combo_modelo_treino.config(state="disabled")
-
-            btn_iniciar.config(text="Iniciar")
-
+                entry_nome_novo.config(state="normal")
+            btn_iniciar.config(text="Iniciar Treino")
         elif var_acao.get() == "simular":
-
-            frame_simular.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-            btn_iniciar.config(text="Iniciar")
-
+            frame_simular.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
+            btn_iniciar.config(text="Iniciar Simulação")
         else:  # dashboard
-
-            frame_dashboard.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
+            frame_dashboard.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
             btn_iniciar.config(text="Abrir Dashboard")
 
-
-
     def iniciar():
-
         """Guarda as opções e fecha a janela para o script continuar"""
         escolhas["acao"] = var_acao.get()
 
         if escolhas["acao"] == "dashboard":
-            import matplotlib.pyplot as plt 
+            import matplotlib.pyplot as plt
             from dashboard import DashboardApp
 
             janela_dashboard = tk.Toplevel(root)
             app_dash = DashboardApp(janela_dashboard)
 
             def fechar_dashboard():
-                plt.close('all')
+                plt.close("all")
                 janela_dashboard.destroy()
 
             janela_dashboard.protocol("WM_DELETE_WINDOW", fechar_dashboard)
             return
 
         if escolhas["acao"] == "treinar":
-
             escolhas["episodios"] = int(var_episodios.get() or 3000)
             escolhas["tipo_treino"] = var_tipo_treino.get()
-            escolhas["modelo_alvo"] = (
-                var_modelo.get() if var_tipo_treino.get() == "continuar" else None
-
-            )
+            if var_tipo_treino.get() == "continuar":
+                escolhas["modelo_alvo"] = var_modelo.get()
+                escolhas["nome_guardar"] = var_modelo.get()
+            else:
+                escolhas["modelo_alvo"] = None
+                nome_digitado = var_nome_novo.get().strip()
+                if nome_digitado:
+                    import re
+                    nome_limpo = re.sub(r'[\\/*?:"<>|]', "", nome_digitado).strip()
+                    if not nome_limpo.endswith(".pkl"):
+                        nome_limpo += ".pkl"
+                    escolhas["nome_guardar"] = nome_limpo
+                else:
+                    escolhas["nome_guardar"] = None
         elif escolhas["acao"] == "simular":
             escolhas["modelo_alvo"] = var_modelo_simular.get()
-
             if not escolhas["modelo_alvo"]:
-
                 messagebox.showerror("Erro", "Nenhum modelo selecionado para simular!")
-
                 return
-
-
 
         root.destroy()
 
+    # --- CABEÇALHO ---
+    header_frame = tk.Frame(root, bg=BG_CARD, bd=1, relief="solid", padx=16, pady=10)
+    header_frame.pack(fill=tk.X, padx=14, pady=(12, 6))
 
+    lbl_logo = tk.Label(
+        header_frame,
+        text="Simulador de Pluma & Reinforcement Learning",
+        font=("Segoe UI", 12, "bold"),
+        bg=BG_CARD,
+        fg=TEXT_DARK,
+    )
+    lbl_logo.pack(anchor="w")
 
-        # --- CONSTRUÇÃO DOS FRAMES ---
+    lbl_sublogo = tk.Label(
+        header_frame,
+        text="Navegação Robótica Subaquática",
+        font=("Segoe UI", 9),
+        bg=BG_CARD,
+        fg=TEXT_MUTED,
+    )
+    lbl_sublogo.pack(anchor="w", pady=(1, 0))
 
-    lbl_titulo = ttk.Label(root, text="Configuração de Execução", font=("Arial", 14, "bold"))
-
-    lbl_titulo.pack(pady=10)
-
-
-
-        # Frame de Seleção Principal
-
-    frame_modo = ttk.LabelFrame(root, text="Modo de Execução", padding=10)
-
-    frame_modo.pack(fill=tk.X, padx=10, pady=5)
-
-
-
-    ttk.Radiobutton(
-
-        frame_modo, text="Treinar Modelo Q-Learning", variable=var_acao,
-
-        value="treinar", command=atualizar_interface,
-
-    ).pack(anchor=tk.W)
-
-    ttk.Radiobutton(
-
-        frame_modo, text="Executar Simulador Visual", variable=var_acao,
-
-        value="simular", command=atualizar_interface,
-
-    ).pack(anchor=tk.W)
+    # --- MODO DE OPERAÇÃO ---
+    frame_modo = ttk.LabelFrame(root, text="  Modo de Operação  ", style="Card.TLabelframe", padding=10)
+    frame_modo.pack(fill=tk.X, padx=14, pady=6)
 
     ttk.Radiobutton(
-
-        frame_modo, text="Abrir Dashboard de Análise", variable=var_acao,
-
-        value="dashboard", command=atualizar_interface,
-
-    ).pack(anchor=tk.W)
-
-
-
-        # Frame de Treino (Dinâmico)
-
-    frame_treino = ttk.LabelFrame(root, text="Opções de Treino", padding=10)
-
-
+        frame_modo,
+        text="Treinar Modelo Q-Learning",
+        variable=var_acao,
+        value="treinar",
+        command=atualizar_interface,
+    ).pack(anchor=tk.W, pady=3)
 
     ttk.Radiobutton(
-
-        frame_treino, text="Iniciar Novo Treino (Do zero)", variable=var_tipo_treino,
-
-        value="novo", command=atualizar_interface,
-
-    ).pack(anchor=tk.W, pady=2)
+        frame_modo,
+        text="Executar Simulação Visual 2D",
+        variable=var_acao,
+        value="simular",
+        command=atualizar_interface,
+    ).pack(anchor=tk.W, pady=3)
 
     ttk.Radiobutton(
+        frame_modo,
+        text="Abrir Dashboard",
+        variable=var_acao,
+        value="dashboard",
+        command=atualizar_interface,
+    ).pack(anchor=tk.W, pady=3)
 
-        frame_treino, text="Continuar Treino de um Modelo", variable=var_tipo_treino,
+    # --- OPÇÕES DE TREINO (Dinâmico) ---
+    frame_treino = ttk.LabelFrame(root, text="  Opções de Treino  ", style="Card.TLabelframe", padding=10)
 
-        value="continuar", command=atualizar_interface,
+    ttk.Radiobutton(
+        frame_treino,
+        text="Iniciar Novo Treino",
+        variable=var_tipo_treino,
+        value="novo",
+        command=atualizar_interface,
+    ).pack(anchor=tk.W, pady=(2, 2))
 
-    ).pack(anchor=tk.W, pady=2)
+    frame_novo_nome = tk.Frame(frame_treino, bg=BG_CARD)
+    frame_novo_nome.pack(fill=tk.X, padx=18, pady=(1, 6))
+    ttk.Label(frame_novo_nome, text="Nome do modelo:").pack(anchor=tk.W)
+    entry_nome_novo = ttk.Entry(frame_novo_nome, textvariable=var_nome_novo, width=42)
+    entry_nome_novo.pack(anchor=tk.W, pady=(2, 0))
 
+    ttk.Radiobutton(
+        frame_treino,
+        text="Continuar Treino de um Modelo",
+        variable=var_tipo_treino,
+        value="continuar",
+        command=atualizar_interface,
+    ).pack(anchor=tk.W, pady=(4, 2))
 
-
+    frame_continuar = tk.Frame(frame_treino, bg=BG_CARD)
+    frame_continuar.pack(fill=tk.X, padx=18, pady=(1, 6))
     combo_modelo_treino = ttk.Combobox(
-
-        frame_treino, textvariable=var_modelo, values=nomes_modelos,
-
-        state="disabled", width=40,
-
+        frame_continuar,
+        textvariable=var_modelo,
+        values=nomes_modelos,
+        state="disabled",
+        width=39,
     )
+    combo_modelo_treino.pack(anchor=tk.W)
 
-    combo_modelo_treino.pack(pady=5)
+    frame_ep = tk.Frame(frame_treino, bg=BG_CARD)
+    frame_ep.pack(fill=tk.X, padx=4, pady=(6, 2))
+    ttk.Label(frame_ep, text="Número de episódios:").pack(anchor=tk.W)
+    entry_ep = ttk.Entry(frame_ep, textvariable=var_episodios, width=16)
+    entry_ep.pack(anchor=tk.W, pady=(2, 0))
 
+    # --- OPÇÕES DE SIMULAÇÃO (Dinâmico) ---
+    frame_simular = ttk.LabelFrame(root, text="  Opções de Simulação  ", style="Card.TLabelframe", padding=10)
 
-
-    lbl_ep = ttk.Label(frame_treino, text="Número de episódios:")
-
-    lbl_ep.pack(anchor=tk.W, pady=(10, 0))
-
-    entry_ep = ttk.Entry(frame_treino, textvariable=var_episodios, width=15)
-
-    entry_ep.pack(anchor=tk.W)
-
-
-
-        # Frame de Simulação (Dinâmico)
-
-    frame_simular = ttk.LabelFrame(root, text="Opções de Simulação", padding=10)
-
-
-
-    ttk.Label(frame_simular, text="Escolhe o modelo a testar:").pack(anchor=tk.W, pady=2)
-
+    ttk.Label(frame_simular, text="Modelo a carregar:").pack(anchor=tk.W, pady=(2, 4))
     combo_modelo_sim = ttk.Combobox(
-
-        frame_simular, textvariable=var_modelo_simular, values=nomes_modelos,
-
-        state="readonly", width=40,
-
+        frame_simular,
+        textvariable=var_modelo_simular,
+        values=nomes_modelos,
+        state="readonly",
+        width=44,
     )
-
-    combo_modelo_sim.pack(pady=5)
-
-
+    combo_modelo_sim.pack(anchor=tk.W, pady=(0, 8))
 
     if not nomes_modelos:
-
-        ttk.Label(
-
+        tk.Label(
             frame_simular,
+            text="Nenhum modelo treinado encontrado na pasta 'modelos'.",
+            font=("Segoe UI", 8),
+            bg=BG_CARD,
+            fg="#dc2626",
+        ).pack(anchor=tk.W, pady=(0, 6))
 
-            text="Nenhum modelo treinado encontrado na pasta 'modelos'.\nTreina um primeiro.",
+    frame_atalhos = tk.Frame(frame_simular, bg=BG_MAIN, bd=1, relief="solid", padx=10, pady=8)
+    frame_atalhos.pack(fill=tk.X, pady=(4, 2))
 
-            foreground="#a33",
+    tk.Label(
+        frame_atalhos,
+        text="Controlos durante a simulação:",
+        font=("Segoe UI", 9, "bold"),
+        bg=BG_MAIN,
+        fg=TEXT_DARK,
+    ).pack(anchor=tk.W)
 
-        ).pack(anchor=tk.W, pady=(5, 0))
+    atalhos_texto = (
+        "• Espaço: Parar / Retomar\n"
+        "• R: Reiniciar o episódio\n"
+        "• ESC: Sair da simulação"
+    )
+    tk.Label(
+        frame_atalhos,
+        text=atalhos_texto,
+        font=("Segoe UI", 8),
+        bg=BG_MAIN,
+        fg=TEXT_MUTED,
+        justify=tk.LEFT,
+    ).pack(anchor=tk.W, pady=(2, 0))
 
-
-
-        # Frame de Dashboard (Dinâmico)
-
-    frame_dashboard = ttk.LabelFrame(root, text="Dashboard de Análise", padding=10)
+    # --- OPÇÕES DE DASHBOARD (Dinâmico, sem lista de recursos) ---
+    frame_dashboard = ttk.LabelFrame(root, text="  Dashboard  ", style="Card.TLabelframe", padding=14)
 
     ttk.Label(
-
         frame_dashboard,
-
-        text=(
-
-            "Abre a janela do Dashboard para consultar métricas de treino,\n"
-
-            "o mapa de rotas dos modelos guardados e editar o config.json."
-
-        ),
-
+        text="Abre a janela do Dashboard para analisar o desempenho,\nrotas de cada episódio e configurações do modelo.",
+        font=("Segoe UI", 9),
         justify=tk.LEFT,
+    ).pack(anchor=tk.W, pady=8)
 
-    ).pack(anchor=tk.W, pady=5)
+    # --- BOTÃO DE AÇÃO ---
+    btn_iniciar = ttk.Button(root, text="Iniciar", command=iniciar, style="Action.TButton")
+    btn_iniciar.pack(side=tk.BOTTOM, pady=16, fill=tk.X, padx=14)
 
-
-
-        # Botão de Ação
-
-    btn_iniciar = ttk.Button(root, text="Iniciar", command=iniciar)
-
-    btn_iniciar.pack(side=tk.BOTTOM, pady=20, fill=tk.X, padx=20)
-
-
-
-        # Inicializa a interface corretamente
-
+    # Inicializa a interface corretamente
     atualizar_interface()
 
     root.mainloop()
@@ -2224,7 +2430,7 @@ if __name__ == "__main__":
 
         agent.train(env, num_episodes=episodios, print_every=50)
 
-        agent.save()
+        agent.save(filename=escolhas.get("nome_guardar"))
 
 
 
