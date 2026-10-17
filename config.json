@@ -107,9 +107,9 @@
     ],
     "agent_class": "QLearningAgent",
     "battery_capacity": 100.0,
-    "battery_base_decay": 0.5,
-    "battery_wind_factor": 1.5,
-    "battery_min_decay": 0.1,
+    "battery_base_decay": 0.08,
+    "battery_wind_factor": 0.80,
+    "battery_min_decay": 0.02,
     "agent_config": {
         "agent_radius": 0.5,
         "agent_speed": 2.4,

@@ -326,9 +326,45 @@ class DashboardApp:
             fg=self.TEXT_PRIMARY,
         )
         self.lbl_info_episodio.pack(side=tk.RIGHT, padx=6)
+        # Contentor com barra de deslocamento vertical (scrollbar) para o mapa e legenda
+        self.scroll_container_mapa = tk.Frame(self.tab_mapa, bg=self.BG_CARD)
+        self.scroll_container_mapa.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        self.frame_canvas_mapa = tk.Frame(self.tab_mapa, bg=self.BG_CARD)
-        self.frame_canvas_mapa.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.canvas_scroll_mapa = tk.Canvas(self.scroll_container_mapa, bg=self.BG_CARD, highlightthickness=0)
+        self.scrollbar_mapa = ttk.Scrollbar(self.scroll_container_mapa, orient="vertical", command=self.canvas_scroll_mapa.yview)
+
+        self.frame_canvas_mapa = tk.Frame(self.canvas_scroll_mapa, bg=self.BG_CARD)
+        self.canvas_window_mapa = self.canvas_scroll_mapa.create_window((0, 0), window=self.frame_canvas_mapa, anchor="nw")
+
+        self.canvas_scroll_mapa.configure(yscrollcommand=self.scrollbar_mapa.set)
+        self.scrollbar_mapa.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas_scroll_mapa.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        def _on_frame_mapa_configure(event=None):
+            self.canvas_scroll_mapa.configure(scrollregion=self.canvas_scroll_mapa.bbox("all"))
+
+        self.frame_canvas_mapa.bind("<Configure>", _on_frame_mapa_configure)
+
+        def _on_canvas_scroll_configure(event):
+            # Garante que o frame interno acompanha a largura disponível
+            self.canvas_scroll_mapa.itemconfig(self.canvas_window_mapa, width=event.width)
+
+        self.canvas_scroll_mapa.bind("<Configure>", _on_canvas_scroll_configure)
+
+        def _on_mousewheel_mapa(event):
+            try:
+                if self.canvas_scroll_mapa.winfo_exists() and self.canvas_scroll_mapa.winfo_ismapped():
+                    x_root, y_root = event.x_root, event.y_root
+                    x1 = self.scroll_container_mapa.winfo_rootx()
+                    y1 = self.scroll_container_mapa.winfo_rooty()
+                    w = self.scroll_container_mapa.winfo_width()
+                    h = self.scroll_container_mapa.winfo_height()
+                    if x1 <= x_root <= (x1 + w) and y1 <= y_root <= (y1 + h):
+                        self.canvas_scroll_mapa.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+
+        self.root.bind_all("<MouseWheel>", _on_mousewheel_mapa, add="+")
 
     # =========================================================================
     # ABA VISUALIZADOR Q-TABLE
@@ -568,6 +604,7 @@ class DashboardApp:
         criar_campo(col_dir, "Duração do Episódio (s):", "max_time")
         criar_campo(col_dir, "Velocidade do Agente (m/s):", "agent_config", "agent_speed")
         criar_campo(col_dir, "Raio do Agente (m):", "agent_config", "agent_radius")
+        criar_campo(col_dir, "Tempo de Espera Agente (s):", "agent_initial_wait_time")
         criar_campo(col_dir, "Capacidade da Bateria:", "battery_capacity")
         criar_campo(col_dir, "Decaimento Base Bateria:", "battery_base_decay")
         criar_campo(col_dir, "Fator Vento Bateria:", "battery_wind_factor")
@@ -777,8 +814,9 @@ class DashboardApp:
 
         opcoes = ["Todos os Episódios (Visão Global)"]
         for ep in self.chaves_episodios_gravados:
-            num_passos = tamanhos[ep] if ep < len(tamanhos) else len(paths[ep])
-            teve_sucesso = (sucessos[ep] == 1) if ep < len(sucessos) else False
+            idx = ep - 1 if ep > 0 else ep
+            num_passos = tamanhos[idx] if 0 <= idx < len(tamanhos) else len(paths[ep])
+            teve_sucesso = (sucessos[idx] == 1) if 0 <= idx < len(sucessos) else False
             status_txt = "Sucesso" if teve_sucesso else "Falha"
             opcoes.append(f"Episódio #{ep} - {num_passos} passos - {status_txt}")
 
@@ -832,6 +870,41 @@ class DashboardApp:
         scale_y = world_size[1] if max_y <= 1.5 else 1.0
         return np.column_stack([p[:, 0] * scale_x, p[:, 1] * scale_y])
 
+    def obter_ponto_deteccao(self, ep_real, p, world_size=(100.0, 50.0), source_pos=(20.0, 25.0)):
+        """
+        Retorna as coordenadas (x, y) em metros do primeiro ponto onde o agente detetou a pluma.
+        Suporta tanto modelos com registo explícito de 'detection_points' como modelos anteriores.
+        """
+        stats = self.dados_modelo_atual.get("stats", {}) if self.dados_modelo_atual else {}
+        det_pts = stats.get("detection_points", {})
+        if ep_real in det_pts:
+            if det_pts[ep_real] is not None:
+                raw = np.array(det_pts[ep_real])
+                scale_x = world_size[0] if raw[0] <= 1.5 else 1.0
+                scale_y = world_size[1] if raw[1] <= 1.5 else 1.0
+                return np.array([raw[0] * scale_x, raw[1] * scale_y])
+            else:
+                return None
+
+        if p is None or len(p) == 0:
+            return None
+
+        src = np.array(source_pos)
+        dists_src = np.linalg.norm(p - src, axis=1)
+        min_src_idx = np.argmin(dists_src)
+
+        if min_src_idx > 10 and dists_src[min_src_idx] < 8.0:
+            # Em missões que contornam a fonte e retornam, o destino de regresso é o ponto de primeira deteção.
+            # O ponto mais próximo de p[-1] na fase de ida (0 até min_src_idx) identifica a primeira deteção.
+            d_end = np.linalg.norm(p[:min_src_idx] - p[-1], axis=1)
+            det_idx = np.argmin(d_end)
+            return p[det_idx]
+        else:
+            for i in range(1, len(p)):
+                if p[i, 0] <= 85.0 and dists_src[i] < dists_src[0] - 5.0:
+                    return p[i]
+            return p[len(p) // 2] if len(p) > 2 else p[0]
+
     def desenhar_mapa_vazio(self):
         """Desenha uma mensagem informativa caso o modelo não contenha trajetórias gravadas."""
         if self.canvas_mapa:
@@ -855,6 +928,8 @@ class DashboardApp:
         self.canvas_mapa = FigureCanvasTkAgg(fig, master=self.frame_canvas_mapa)
         self.canvas_mapa.draw()
         self.canvas_mapa.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.frame_canvas_mapa.update_idletasks()
+        self.canvas_scroll_mapa.configure(scrollregion=self.canvas_scroll_mapa.bbox("all"))
 
     def desenhar_mapa_selecionado(self):
         """Renderiza a rota individual ou o mapa global de dispersão e navegação."""
@@ -940,6 +1015,11 @@ class DashboardApp:
 
             p_last = self.converter_para_metros(paths[eps_gravados[-1]], world_size)
             ax.scatter(p_last[0, 0], p_last[0, 1], marker="o", s=80, color=self.COLOR_SUCCESS, edgecolor="#0f172a", zorder=7, label=f"Início Último Ep (#{eps_gravados[-1]})")
+
+            det_last = self.obter_ponto_deteccao(eps_gravados[-1], p_last, world_size, source_pos)
+            if det_last is not None:
+                ax.scatter(det_last[0], det_last[1], marker="D", s=85, color="#d946ef", edgecolor="#0f172a", linewidth=1.3, zorder=8, label=f"1ª Deteção Último Ep (#{eps_gravados[-1]})")
+
             ax.scatter(p_last[-1, 0], p_last[-1, 1], marker="s", s=80, color=self.COLOR_PRIMARY, edgecolor="#0f172a", zorder=7, label=f"Fim Último Ep (#{eps_gravados[-1]})")
 
             sm = cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -956,17 +1036,21 @@ class DashboardApp:
             ep_real = self.chaves_episodios_gravados[ep_idx]
             p = self.converter_para_metros(paths[ep_real], world_size)
 
-            teve_sucesso = (sucessos[ep_real] == 1) if ep_real < len(sucessos) else False
-            num_passos = tamanhos[ep_real] if ep_real < len(tamanhos) else len(p)
-            recompensa_ep = recompensas[ep_real] if ep_real < len(recompensas) else 0.0
+            idx = ep_real - 1 if ep_real > 0 else ep_real
+            teve_sucesso = (sucessos[idx] == 1) if 0 <= idx < len(sucessos) else False
+            num_passos = tamanhos[idx] if 0 <= idx < len(tamanhos) else len(p)
+            recompensa_ep = recompensas[idx] if 0 <= idx < len(recompensas) else 0.0
 
             diffs = np.diff(p, axis=0)
             dist_total = float(np.sum(np.sqrt(np.sum(diffs**2, axis=1)))) if len(p) > 1 else 0.0
 
+            ponto_det = self.obter_ponto_deteccao(ep_real, p, world_size, source_pos)
+            det_info_str = f"  |  1ª Deteção: ({ponto_det[0]:.1f}m, {ponto_det[1]:.1f}m)" if ponto_det is not None else ""
+
             status_cor = self.COLOR_SUCCESS if teve_sucesso else self.COLOR_DANGER
             status_nome = "Sucesso" if teve_sucesso else "Falha"
             self.lbl_info_episodio.config(
-                text=f"Ep #{ep_real}  |  {num_passos} passos  |  Distância: {dist_total:.1f} m  |  Recompensa: {recompensa_ep:+.1f}  |  {status_nome}",
+                text=f"Ep #{ep_real}  |  {num_passos} passos  |  Distância: {dist_total:.1f} m{det_info_str}  |  Recompensa: {recompensa_ep:+.1f}  |  {status_nome}",
                 fg=status_cor,
             )
 
@@ -1017,6 +1101,33 @@ class DashboardApp:
                 label=f"Início ({p[0, 0]:.1f}m, {p[0, 1]:.1f}m)",
             )
 
+            # Primeiro Ponto de Deteção da Pluma (Losango Magenta com caixa de anotação)
+            if ponto_det is not None:
+                ax.scatter(
+                    ponto_det[0],
+                    ponto_det[1],
+                    marker="D",
+                    s=150,
+                    color="#d946ef",
+                    edgecolor="#0f172a",
+                    linewidth=1.5,
+                    zorder=8,
+                    label=f"1ª Deteção Pluma ({ponto_det[0]:.1f}m, {ponto_det[1]:.1f}m)",
+                )
+                offset_y = 4.5 if ponto_det[1] < world_size[1] - 8 else -6.0
+                offset_x = 2.5 if ponto_det[0] < world_size[0] - 18 else -18.0
+                ax.annotate(
+                    f"1ª Deteção\n({ponto_det[0]:.1f}m, {ponto_det[1]:.1f}m)",
+                    xy=(ponto_det[0], ponto_det[1]),
+                    xytext=(ponto_det[0] + offset_x, ponto_det[1] + offset_y),
+                    arrowprops=dict(arrowstyle="->", color="#c026d3", lw=1.3),
+                    fontsize=8,
+                    fontweight="bold",
+                    color="#86198f",
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="#fae8ff", edgecolor="#f0abfc", alpha=0.92),
+                    zorder=9,
+                )
+
             # Marcador de Fim (Quadrado Verde em sucesso, Cruz Vermelha em falha)
             cor_fim = self.COLOR_SUCCESS if teve_sucesso else self.COLOR_DANGER
             icone_fim = "s" if teve_sucesso else "X"
@@ -1049,7 +1160,9 @@ class DashboardApp:
         ax.tick_params(colors="#475569", labelsize=8)
 
         ax.legend(
-            loc="lower right",
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.11),
+            ncol=3,
             facecolor="#ffffff",
             edgecolor="#cbd5e1",
             fontsize=8,
@@ -1057,9 +1170,12 @@ class DashboardApp:
         )
 
         fig.tight_layout()
+        fig.subplots_adjust(bottom=0.14)
         self.canvas_mapa = FigureCanvasTkAgg(fig, master=self.frame_canvas_mapa)
         self.canvas_mapa.draw()
         self.canvas_mapa.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.frame_canvas_mapa.update_idletasks()
+        self.canvas_scroll_mapa.configure(scrollregion=self.canvas_scroll_mapa.bbox("all"))
 
 
 if __name__ == "__main__":

@@ -68,6 +68,22 @@ class QLearningAgent:
         self.episode_lengths = []
         self.success_history = []
         self.saved_paths = {}
+        self.saved_detection_points = {}
+        self._cached_legacy = False
+
+    def _is_legacy_model(self) -> bool:
+        """
+        Deteta se a Q-Table em memória foi carregada de um ficheiro legado
+        (onde as chaves tinham menos de 7 elementos: 4, 5 ou 6).
+        Modelos novos em treino utilizam sempre o formato moderno de 7 dimensões.
+        """
+        if getattr(self, "_cached_legacy", None) is not None:
+            return self._cached_legacy
+        if not self.q_table:
+            return False
+        first_key = next(iter(self.q_table.keys()))
+        self._cached_legacy = bool(len(first_key) < 7)
+        return self._cached_legacy
 
     def _state_key(self, state) -> tuple:
         """
@@ -85,12 +101,26 @@ class QLearningAgent:
 
         # 2. Discretização da concentração de odor recebida no sensor
         conc = state[2]
-        if conc <= 0.33:
-            c_b = 0  # Concentração nula ou muito baixa
-        elif conc <= 0.67:
-            c_b = 1  # Concentração moderada (limiar da pluma)
+        legacy = self._is_legacy_model()
+
+        if legacy:
+            if conc <= 0.33:
+                c_b = 0  # Concentração nula ou muito baixa
+            elif conc <= 0.67:
+                c_b = 1  # Concentração moderada (limiar da pluma)
+            else:
+                c_b = 2  # Concentração elevada (núcleo da pluma)
         else:
-            c_b = 2  # Concentração elevada (núcleo da pluma)
+            # Calibração para deteção de fronteira (threshold físico = 1.0 / 10.0 = 0.10):
+            # 0: Ar limpo / Fora da pluma (< 0.5 unidades)
+            # 1: Fronteira / Limiar da pluma (0.5 a 2.0 unidades)
+            # 2: Núcleo denso da pluma (> 2.0 unidades)
+            if conc < 0.05:
+                c_b = 0
+            elif conc <= 0.20:
+                c_b = 1
+            else:
+                c_b = 2
 
         # 3. Discretização da orientação do escoamento do fluido (4 quadrantes)
         fx, fy = state[3], state[4]
@@ -108,10 +138,14 @@ class QLearningAgent:
                     mission_state_bin = int(np.round(state[5]))
                 return (x_b, y_b, c_b, wind_dir, mission_state_bin)
 
-        # 4. Estado da missão (exploração, seguimento de fronteira, retorno)
+        # 4. Estado da missão (0: Procura, 1: Contorno/Seguimento, 2: Regresso Contorno, 3: Regresso Fecho)
         mission_state_bin = 0
         if len(state) > 5:
-            mission_state_bin = int(np.round(state[5]))
+            raw_m = float(state[5])
+            if legacy:
+                mission_state_bin = 1 if raw_m >= 1.5 else int(np.round(raw_m))
+            else:
+                mission_state_bin = int(np.clip(np.round(raw_m), 0, 3))
 
         # 5. Nível de carga da bateria (crítico, operacional, elevado)
         battery_bin = 0
@@ -124,7 +158,15 @@ class QLearningAgent:
             else:
                 battery_bin = 2  # Bateria alta
 
-        return (x_b, y_b, c_b, wind_dir, mission_state_bin, battery_bin)
+        # 6. Sentido de varrimento transversal (Cast: 0=Subindo, 1=Descendo)
+        if legacy:
+            return (x_b, y_b, c_b, wind_dir, mission_state_bin, battery_bin)
+
+        cast_dir_bin = 0
+        if len(state) > 7:
+            cast_dir_bin = int(np.clip(np.round(state[7]), 0, 1))
+
+        return (x_b, y_b, c_b, wind_dir, mission_state_bin, battery_bin, cast_dir_bin)
 
     def choose_action(self, state, greedy: bool = False) -> int:
         """
@@ -143,10 +185,9 @@ class QLearningAgent:
         if not greedy and random.random() < self.epsilon:
             return self.env.action_space.sample()
         else:
-            # Fase de Aproveitamento (Exploitation): melhor ação aprendida
-            q_values = self.q_table.get(key, np.zeros(self.env.action_space.n))
-            if np.all(q_values == 0):
-                # Estado novo sem histórico prévio: sorteia ação para evitar bloqueios
+            q_values = self.q_table.get(key, None)
+            if q_values is None or np.all(q_values == 0):
+                # Estado não aprendido na Q-Table: decisão aleatória uniforme (sem regras hardcoded)
                 return random.randint(0, self.env.action_space.n - 1)
             return int(np.argmax(q_values))
 
@@ -186,10 +227,12 @@ class QLearningAgent:
             print_every: Intervalo de episódios para apresentação do progresso no terminal.
         """
         import logging
-        pasta_logs = "logs"
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        pasta_logs = os.path.join(base_dir, "logs")
         os.makedirs(pasta_logs, exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = os.path.join(pasta_logs, f"treino_{timestamp}.log")
+        self.current_log_file = log_filename
 
         logger = logging.getLogger(f"QLearningTrain_{timestamp}")
         logger.setLevel(logging.INFO)
@@ -217,7 +260,7 @@ class QLearningAgent:
             ep_absoluto = episodios_iniciais + ep_relativo
 
             state, info = env.reset()
-            current_path = [(state[0], state[1])]
+            current_path = [(float(env.pos[0] / env.config["world_width"]), float(env.pos[1] / env.config["world_height"]))]
             done = truncated = False
             total_reward = 0
             step = 0
@@ -225,8 +268,9 @@ class QLearningAgent:
             # Execução dos passos do episódio
             while not (done or truncated):
                 action = self.choose_action(state)
+
                 next_state, reward, done, truncated, info = env.step(action)
-                current_path.append((next_state[0], next_state[1]))
+                current_path.append((float(env.pos[0] / env.config["world_width"]), float(env.pos[1] / env.config["world_height"])))
 
                 self.update(state, action, reward, next_state, done, truncated)
 
@@ -247,23 +291,32 @@ class QLearningAgent:
                 f"Epsilon: {self.epsilon:.4f} | Estados Q: {len(self.q_table)}"
             )
 
+            # Decaimento adaptativo para convergir epsilon a min_epsilon nos últimos 25-30% dos episódios
+            decay_target_ep = max(50, int(0.70 * num_episodes))
+            computed_decay = (self.min_epsilon / 1.0) ** (1.0 / decay_target_ep)
+            effective_decay = min(self.epsilon_decay, computed_decay)
+
             # Decaimento progressivo da taxa de exploração estocástica
             if self.epsilon > self.min_epsilon:
-                self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+                self.epsilon = max(self.min_epsilon, self.epsilon * effective_decay)
 
-            # Paragem antecipada (Early Stopping) se a taxa de sucesso estabilizar nos 80%
-            if ep_relativo >= 100:
-                w_check = min(100, len(self.success_history))
-                avg_success_check = np.mean(self.success_history[-w_check:])
-                if avg_success_check >= 0.80:
-                    logger.info(f"Convergência atingida com {avg_success_check*100:.1f}% de sucesso no ep {ep_absoluto}. Paragem antecipada.")
-                    print(f"\n[Early Stopping] Convergência verificada ({avg_success_check*100:.1f}% de sucesso) no episódio {ep_absoluto}!")
+            # Paragem antecipada (Early Stopping) se a taxa de sucesso for 80% ou mais em 300 episódios seguidos
+            if len(self.success_history) >= 300:
+                avg_success_300 = np.mean(self.success_history[-300:])
+                if avg_success_300 >= 0.80:
+                    logger.info(f"Convergência atingida com {avg_success_300*100:.1f}% de sucesso nos últimos 300 episódios no ep {ep_absoluto}. Paragem antecipada.")
+                    print(f"\n[Early Stopping] Convergência verificada ({avg_success_300*100:.1f}% de sucesso nos últimos 300 episódios) no episódio {ep_absoluto}!")
                     break
 
             # Armazenamento seletivo de trajetórias para inspeção no mapa do Dashboard
             save_interval = 1 if num_episodes <= 100 else (5 if num_episodes <= 500 else 20)
             if ep_relativo <= 10 or ep_relativo > num_episodes - 25 or ep_absoluto % save_interval == 0:
                 self.saved_paths[ep_absoluto] = current_path
+                det_pt = getattr(env, "first_detection_pos", None)
+                if det_pt is not None:
+                    self.saved_detection_points[ep_absoluto] = (float(det_pt[0]), float(det_pt[1]))
+                else:
+                    self.saved_detection_points[ep_absoluto] = None
 
             # Apresentação do progresso periódico na consola
             if ep_relativo % print_every == 0:
@@ -321,6 +374,7 @@ class QLearningAgent:
                 "lengths": self.episode_lengths,
                 "successes": self.success_history,
                 "paths": getattr(self, "saved_paths", {}),
+                "detection_points": getattr(self, "saved_detection_points", {}),
             },
             "source_pos": getattr(self.env, 'config', {}).get("source_position", (20.0, 25.0)),
             "world_size": (getattr(self.env, 'config', {}).get("world_width", 100.0), getattr(self.env, 'config', {}).get("world_height", 50.0))
@@ -328,6 +382,21 @@ class QLearningAgent:
 
         with open(caminho_completo, "wb") as f:
             pickle.dump(data, f)
+
+        # Guarda e sincroniza o ficheiro de log do treino na pasta logs
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        pasta_logs = os.path.join(base_dir, "logs")
+        os.makedirs(pasta_logs, exist_ok=True)
+        if getattr(self, "current_log_file", None) and os.path.exists(self.current_log_file):
+            import shutil
+            base_model_name = os.path.splitext(os.path.basename(caminho_completo))[0]
+            log_model_dest = os.path.join(pasta_logs, f"{base_model_name}.log")
+            if os.path.abspath(log_model_dest) != os.path.abspath(self.current_log_file):
+                try:
+                    shutil.copyfile(self.current_log_file, log_model_dest)
+                    print(f"    Registo de treino sincronizado em: {log_model_dest}")
+                except Exception:
+                    pass
 
         print(f"\n[+] Modelo e estatísticas gravados com sucesso em: {caminho_completo}")
         print(f"    Episódios acumulados: {len(self.episode_rewards)}")
@@ -356,15 +425,18 @@ class QLearningAgent:
             with open(filepath, "rb") as f:
                 data = pickle.load(f)
 
-            self.q_table.update(data["q_table"])
+            self.q_table = dict(data["q_table"])
+            self._cached_legacy = None
             self.epsilon = data.get("epsilon", self.epsilon)
             self.state_bins = data.get("state_bins", self.state_bins)
+            self.loaded_model_name = os.path.basename(filepath)
 
             if "stats" in data:
                 self.episode_rewards = data["stats"].get("rewards", [])
                 self.episode_lengths = data["stats"].get("lengths", [])
                 self.success_history = data["stats"].get("successes", [])
                 self.saved_paths = data["stats"].get("paths", {})
+                self.saved_detection_points = data["stats"].get("detection_points", {})
 
             print(f"[+] Modelo carregado com sucesso de {filepath}")
             print(f"    Estados na Q-Table: {len(self.q_table)}")
